@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node / Vite
+node_modules/
+dist/
+
+# Entorno y secretos
+.env
+.env.*
+
+# Editores y sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,6 @@
+# Versiones fijadas para funcionar desde Python 3.8 hasta 3.12
+fastapi==0.103.2
+pydantic==2.5.3
+uvicorn==0.27.1
+psycopg[binary]==3.1.18
+PyJWT==2.8.0
