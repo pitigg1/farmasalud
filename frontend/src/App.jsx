@@ -57,12 +57,14 @@ export default function App() {
       <header>
         <div className="logo"><i>🧪</i><div><b>Farma<span>Salud</span></b><small>DROGUERÍA DIGITAL</small></div></div>
         <input className="search" placeholder="Buscar medicamentos, vitaminas, cuidado personal..." aria-label="Buscar" value={q} onChange={e => { setQ(e.target.value) }} />
+        <div className="hright">
         {role === 'cliente' && <button className="bag" aria-label="Carrito" onClick={() => setDrawer(true)}>🛍<b>{count}</b></button>}
         {auth ? (
           <div className="user"><div className="av">{name.slice(0, 2).toUpperCase()}</div><div><b>{name}</b><span className="chip">{chipLabel}</span></div>
             <button className="out" aria-label="Cambiar contraseña" title="Cambiar contraseña" onClick={() => setModal('clave')}>🔑</button>
             <button className="out" aria-label="Cerrar sesión" title="Cerrar sesión" onClick={() => { setAuth(null); setCart({}); setOrder(null); setModal(null); setHistory(false); setReport(false); setDrawer(false); say('Sesión cerrada') }}>⎋</button></div>
         ) : <button className="yel" onClick={() => setModal('login')}>Iniciar sesión</button>}
+        </div>
       </header>
 
       <div className="wrap">
