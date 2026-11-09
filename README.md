@@ -1,9 +1,10 @@
 # FarmaSalud · catálogo, compras y ventas asistidas
 
 Prototipo académico con React + Vite, FastAPI y PostgreSQL 16.
-El catálogo y las ventas se leen de PostgreSQL. Los medicamentos y las cuentas
-de empleado/administrador se precargan; esta entrega no permite crear, borrar
-ni ajustar medicamentos desde la aplicación.
+El catálogo y las ventas se leen de PostgreSQL. Las cuentas de empleado y
+administrador se precargan. El administrador gestiona el inventario desde la
+aplicación: registra, edita, ajusta el stock y retira medicamentos; cada cambio
+de stock queda en `movimientos_inventario`.
 
 ## Estructura
 
@@ -21,6 +22,7 @@ backend/
 frontend/src/
   App.jsx                   Catálogo y acceso según rol
   Sales.jsx                 Cliente, venta asistida, historial y comprobante
+  Inventario.jsx            Gestión de inventario del administrador
   api.js                    Solicitudes a FastAPI
   styles.css                Diseño original y estilos de impresión
 ```
@@ -116,7 +118,7 @@ puerto silenciosamente.
 |---|---|---|
 | cliente@mail.com | farmacia123 | Compra propia e historial |
 | empleado@farmacia.com | farmacia123 | Registro de clientes y venta presencial |
-| admin@farmacia.com | farmacia123 | Consulta de inventario y ventas |
+| admin@farmacia.com | farmacia123 | Gestión de inventario y consulta de ventas |
 
 La API asigna esa contraseña únicamente a registros que todavía tengan
 `REEMPLAZAR_POR_HASH`; no reemplaza contraseñas ya establecidas.
@@ -187,7 +189,22 @@ La tabla `formulas` guarda `valida=TRUE`; el pedido identifica al empleado.
 El sistema registra la revisión humana: no verifica automáticamente documentos
 médicos ni se conecta con un sistema externo.
 
-### E. Rollback y concurrencia
+### E. Gestión de inventario (administrador)
+
+1. Entra con `admin@farmacia.com`.
+2. Pulsa **+ Nuevo medicamento**: completa nombre, mg, forma, laboratorio,
+   categoría, precio y stock inicial. Si falta un laboratorio o una categoría,
+   créalo con **+ nuevo**. El medicamento aparece de inmediato en el catálogo.
+3. Usa **Ajustar stock** con una entrada (compra a proveedor) o una salida
+   (vencidos, conteo físico) y un motivo. Abre **Movimientos** para ver el registro
+   con fecha, tipo, cantidad, motivo y usuario.
+4. **Editar** cambia datos y precio, pero no el stock: el stock solo cambia
+   con ajustes registrados o con ventas.
+5. **Retirar** oculta el medicamento del catálogo y bloquea nuevas ventas, pero
+   conserva los pedidos y comprobantes anteriores. **Reactivar** lo devuelve.
+6. En pgAdmin, revisa `medicamentos` y `movimientos_inventario`.
+
+### F. Rollback y concurrencia
 
 No alteres el stock de la BD principal para preparar la demostración. Ejecuta las
 pruebas de la sección siguiente en `farmacia_test`. Muestra especialmente:
@@ -198,6 +215,7 @@ pruebas de la sección siguiente en `farmacia_test`. Muestra especialmente:
 - Dos envíos simultáneos con la misma clave devuelven la misma venta y descuentan una vez.
 - Dos ventas del mismo cliente no mezclan reservas.
 - Un cliente no puede consultar comprobantes ajenos ni registrar clientes.
+- Un ajuste de stock y una venta simultáneos por la última unidad: solo uno se aplica.
 
 ## Ejecutar pruebas con PostgreSQL real
 
@@ -233,6 +251,13 @@ Para revisar el frontend: `cd frontend` y `npm.cmd run build`.
 | GET | /api/pedidos | Cliente: propios; empleado/admin: todas las ventas |
 | POST | /api/pedidos | Cliente o empleado |
 | GET | /api/pedidos/{id}/comprobante | Propietario, empleado o admin |
+| GET | /api/inventario, /api/inventario/movimientos | Administrador |
+| POST | /api/medicamentos | Administrador: registrar (con stock inicial) |
+| PUT | /api/medicamentos/{id} | Administrador: editar datos y precio |
+| PATCH | /api/medicamentos/{id}/stock | Administrador: entrada o ajuste con motivo |
+| DELETE | /api/medicamentos/{id} | Administrador: retiro lógico |
+| POST | /api/medicamentos/{id}/reactivar | Administrador |
+| GET, POST | /api/laboratorios, /api/categorias | Administrador |
 
 `POST /api/pedidos` requiere `clave_operacion` (UUID), `metodo_pago` e `items`.
 El cliente envía sus datos en `cliente`; el empleado envía el `id_cliente`

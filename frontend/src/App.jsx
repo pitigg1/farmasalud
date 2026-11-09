@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from './api'
 import './styles.css'
 import { Checkout, Seller, Orders, Receipt } from './Sales'
+import { Inventario } from './Inventario'
 
 const fmt = n => '$' + Number(n).toLocaleString('es-CO')
 const TODOS = 'Todos los productos'
@@ -101,8 +102,8 @@ export default function App() {
         )}
         {role === 'empleado' && <Seller auth={auth} meds={meds} reload={loadMeds} onReceipt={setOrder} />}
         {role === 'admin' && <>
-          <section className="banner"><div><h1>Administración FarmaSalud</h1><p>Consulta de ventas e inventario real.</p></div><button className="yel" onClick={loadMeds}>Actualizar inventario</button></section>
-          <div className="panel table-scroll"><h2>Inventario de medicamentos</h2><table><thead><tr><th>Medicamento</th><th>Stock físico</th><th>Disponible</th></tr></thead><tbody>{meds.map(m => <tr key={m.id_medicamento}><td>{m.nombre}</td><td>{m.stock_fisico}</td><td>{m.stock}</td></tr>)}</tbody></table></div>
+          <section className="banner"><div><h1>Administración FarmaSalud</h1><p>Gestión de inventario y consulta de ventas.</p></div></section>
+          <Inventario auth={auth} onChange={loadMeds} />
           <Orders auth={auth} onReceipt={setOrder} />
         </>}
       </div>

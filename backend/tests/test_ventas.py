@@ -214,15 +214,101 @@ def test_receipt_access_and_snapshot(client):
     assert client.get(route, headers=headers(client, "admin@farmacia.com")).status_code == 200
 
 
-def test_removed_endpoints_and_duplicate_items(client):
-    auth = headers(client, "admin@farmacia.com")
-    assert client.post("/api/medicamentos", headers=auth, json={}).status_code == 405
-    assert client.patch("/api/medicamentos/1/stock", headers=auth, json={"delta": 10}).status_code == 404
-    assert client.delete("/api/medicamentos/1", headers=auth).status_code == 404
+def test_only_admin_manages_inventory_and_duplicate_items(client):
+    nuevo = {"id_laboratorio": 1, "id_categoria": 1, "nombre": "Ibuprofeno", "precio": 6000}
+    for correo in ("empleado@farmacia.com", "cliente@mail.com"):
+        auth = headers(client, correo)
+        assert client.post("/api/medicamentos", headers=auth, json=nuevo).status_code == 403
+        assert client.patch("/api/medicamentos/1/stock", headers=auth,
+                            json={"cantidad": 10, "motivo": "Compra"}).status_code == 403
+        assert client.delete("/api/medicamentos/1", headers=auth).status_code == 403
+        assert client.get("/api/inventario", headers=auth).status_code == 403
+    assert client.post("/api/medicamentos", json=nuevo).status_code == 401
+    admin = headers(client, "admin@farmacia.com")
     body = order()
-    assert client.post("/api/pedidos", headers=auth, json=body).status_code == 403
+    assert client.post("/api/pedidos", headers=admin, json=body).status_code == 403
     body["items"].append(copy.deepcopy(body["items"][0]))
     assert client.post("/api/pedidos", headers=headers(client), json=body).status_code == 422
+
+
+def test_admin_creates_and_edits_medication(client):
+    admin = headers(client, "admin@farmacia.com")
+    lab = client.post("/api/laboratorios", headers=admin, json={"nombre": "Tecnoquímicas", "pais": "Colombia"})
+    cat = client.post("/api/categorias", headers=admin, json={"nombre": "Antiinflamatorios"})
+    assert lab.status_code == 201 and cat.status_code == 201
+    assert client.post("/api/categorias", headers=admin, json={"nombre": "Antiinflamatorios"}).status_code == 409
+    nuevo = {"id_laboratorio": lab.json()["id_laboratorio"], "id_categoria": cat.json()["id_categoria"],
+             "nombre": "Ibuprofeno", "mg": 400, "forma": "Tableta", "requiere_formula": False,
+             "precio": 6000, "stock_inicial": 30}
+    r = client.post("/api/medicamentos", headers=admin, json=nuevo)
+    assert r.status_code == 201, r.text
+    med = r.json()
+    assert (med["stock_fisico"], med["disponible"], med["laboratorio"]) == (30, 30, "Tecnoquímicas")
+    assert scalar("SELECT cantidad FROM movimientos_inventario WHERE id_medicamento=%s AND tipo='entrada'",
+                  (med["id_medicamento"],)) == 30
+    catalogo = client.get("/api/medicamentos", params={"q": "Ibuprofeno"}).json()
+    assert catalogo[0]["nombre"] == "Ibuprofeno 400mg" and catalogo[0]["stock"] == 30
+    # Editar no cambia el stock; solo los datos descriptivos y el precio.
+    edit = {k: v for k, v in nuevo.items() if k != "stock_inicial"} | {"precio": 6500, "requiere_formula": True}
+    r = client.put(f"/api/medicamentos/{med['id_medicamento']}", headers=admin, json=edit)
+    assert r.status_code == 200 and float(r.json()["precio"]) == 6500 and r.json()["stock_fisico"] == 30
+    assert r.json()["requiere_formula"] is True
+    assert client.put("/api/medicamentos/9999", headers=admin, json=edit).status_code == 404
+    assert client.post("/api/medicamentos", headers=admin, json=nuevo | {"id_laboratorio": 9999}).status_code == 422
+    assert client.post("/api/medicamentos", headers=admin, json=nuevo | {"precio": -1}).status_code == 422
+
+
+def test_stock_adjustment_is_logged_and_respects_reservations(client):
+    admin = headers(client, "admin@farmacia.com")
+    r = client.patch("/api/medicamentos/1/stock", headers=admin, json={"cantidad": 25, "motivo": "Compra a proveedor"})
+    assert r.status_code == 200 and r.json()["stock_fisico"] == 225
+    r = client.patch("/api/medicamentos/1/stock", headers=admin, json={"cantidad": -5, "motivo": "Vencidos"})
+    assert r.status_code == 200 and r.json()["stock_fisico"] == 220
+    movs = client.get("/api/inventario/movimientos", headers=admin, params={"id_medicamento": 1}).json()
+    assert [(m["tipo"], m["cantidad"], m["usuario"]) for m in movs[:2]] == [
+        ("ajuste", -5, "admin@farmacia.com"), ("entrada", 25, "admin@farmacia.com")]
+    with db() as conn:
+        conn.execute("INSERT INTO reservas (id_cliente,id_medicamento,cantidad) VALUES (1,1,200)")
+    r = client.patch("/api/medicamentos/1/stock", headers=admin, json={"cantidad": -30, "motivo": "Merma"})
+    assert r.status_code == 409
+    assert scalar("SELECT stock FROM medicamentos WHERE id_medicamento=1") == 220
+    assert client.patch("/api/medicamentos/1/stock", headers=admin, json={"cantidad": 0, "motivo": "Nada"}).status_code == 422
+    assert client.patch("/api/medicamentos/1/stock", headers=admin, json={"cantidad": 5}).status_code == 422
+    assert client.patch("/api/medicamentos/9999/stock", headers=admin, json={"cantidad": 5, "motivo": "X12"}).status_code == 404
+
+
+def test_retired_medication_not_sold_and_receipts_kept(client):
+    auth, admin = headers(client), headers(client, "admin@farmacia.com")
+    sale = client.post("/api/pedidos", headers=auth, json=order(qty=1))
+    assert sale.status_code == 201
+    assert client.delete("/api/medicamentos/1", headers=admin).json()["activo"] is False
+    assert all(m["id_medicamento"] != 1 for m in client.get("/api/medicamentos").json())
+    assert client.post("/api/pedidos", headers=auth, json=order(qty=1)).status_code == 404
+    receipt = client.get(f"/api/pedidos/{sale.json()['id_pedido']}/comprobante", headers=auth)
+    assert receipt.status_code == 200 and receipt.json()["items"][0]["id_medicamento"] == 1
+    inv = client.get("/api/inventario", headers=admin).json()
+    assert [m["activo"] for m in inv if m["id_medicamento"] == 1] == [False]
+    assert client.post("/api/medicamentos/1/reactivar", headers=admin).json()["activo"] is True
+    assert client.post("/api/pedidos", headers=auth, json=order(qty=1)).status_code == 201
+
+
+def test_concurrent_adjustment_and_sale_keep_stock_consistent(client):
+    auth, admin = headers(client), headers(client, "admin@farmacia.com")
+    with db() as conn:
+        conn.execute("UPDATE medicamentos SET stock=1 WHERE id_medicamento=1")
+    barrier = Barrier(2)
+    def sell():
+        barrier.wait(timeout=10)
+        return client.post("/api/pedidos", headers=auth, json=order(qty=1))
+    def adjust():
+        barrier.wait(timeout=10)
+        return client.patch("/api/medicamentos/1/stock", headers=admin, json={"cantidad": -1, "motivo": "Dañado"})
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        s, a = pool.submit(sell), pool.submit(adjust)
+        codes = sorted([s.result().status_code, a.result().status_code])
+    # Solo una operación puede usar la última unidad; el stock nunca queda negativo.
+    assert codes in ([200, 409], [201, 409]), codes
+    assert scalar("SELECT stock FROM medicamentos WHERE id_medicamento=1") == 0
 
 
 def test_disabled_account_rejected(client):

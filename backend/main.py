@@ -4,6 +4,7 @@ import json
 import os
 import secrets
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import List, Literal, Optional
 from uuid import UUID
 
@@ -167,6 +168,174 @@ def medicamentos(q: str = "", db=Depends(get_db)):
     return db.execute(CATALOGO, (f"%{q}%",)).fetchall()
 
 
+
+# ---------- Gestionar inventario (caso de uso del Administrador) ----------
+def admin_only(user=Depends(current_user)):
+    if user["rol"] != "admin":
+        raise HTTPException(403, "Esta operación requiere una cuenta de administrador.")
+    return user
+
+
+class MedicamentoIn(Entrada):
+    id_laboratorio: int = Field(gt=0)
+    id_categoria: int = Field(gt=0)
+    nombre: str = Field(min_length=1, max_length=150)
+    mg: Optional[int] = Field(default=None, gt=0, le=1_000_000)
+    forma: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    requiere_formula: bool = False
+    precio: Decimal = Field(ge=0, le=Decimal("99999999.99"), decimal_places=2)
+
+
+class MedicamentoNuevo(MedicamentoIn):
+    stock_inicial: int = Field(default=0, ge=0, le=1_000_000, strict=True)
+
+
+class AjusteStock(Entrada):
+    cantidad: int = Field(ge=-1_000_000, le=1_000_000, strict=True)
+    motivo: str = Field(min_length=3, max_length=200)
+
+    @model_validator(mode="after")
+    def no_cero(self):
+        if self.cantidad == 0:
+            raise ValueError("La cantidad del ajuste no puede ser cero.")
+        return self
+
+
+class LaboratorioIn(Entrada):
+    nombre: str = Field(min_length=1, max_length=100)
+    pais: Optional[str] = Field(default=None, min_length=1, max_length=50)
+
+
+class CategoriaIn(Entrada):
+    nombre: str = Field(min_length=1, max_length=100)
+
+
+INVENTARIO = """
+SELECT m.id_medicamento,m.nombre,m.mg,m.forma,m.requiere_formula,m.precio,m.activo,
+       m.id_laboratorio,l.nombre AS laboratorio,m.id_categoria,c.nombre AS categoria,
+       m.stock AS stock_fisico,v.reservado,v.disponible
+FROM medicamentos m JOIN laboratorios l USING (id_laboratorio)
+JOIN categorias c USING (id_categoria) JOIN v_stock_disponible v USING (id_medicamento)
+"""
+
+
+def medicamento_admin(db, id_medicamento):
+    row = db.execute(INVENTARIO + " WHERE m.id_medicamento=%s", (id_medicamento,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Medicamento no encontrado.")
+    return row
+
+
+@app.get("/api/inventario")
+def inventario(user=Depends(admin_only), db=Depends(get_db)):
+    return db.execute(INVENTARIO + " ORDER BY m.activo DESC, m.nombre").fetchall()
+
+
+@app.get("/api/inventario/movimientos")
+def movimientos(id_medicamento: Optional[int] = None, user=Depends(admin_only), db=Depends(get_db)):
+    return db.execute("SELECT mv.id_movimiento,mv.fecha,mv.tipo,mv.cantidad,mv.motivo,m.nombre AS medicamento,"
+                      "u.correo AS usuario FROM movimientos_inventario mv JOIN medicamentos m USING (id_medicamento) "
+                      "LEFT JOIN usuarios u ON u.id_usuario=mv.id_usuario "
+                      "WHERE %s::INT IS NULL OR mv.id_medicamento=%s ORDER BY mv.id_movimiento DESC LIMIT 100",
+                      (id_medicamento, id_medicamento)).fetchall()
+
+
+@app.post("/api/medicamentos", status_code=201)
+def crear_medicamento(m: MedicamentoNuevo, user=Depends(admin_only), db=Depends(get_db)):
+    try:
+        with db.transaction():
+            mid = db.execute("INSERT INTO medicamentos (id_laboratorio,id_categoria,nombre,mg,forma,requiere_formula,"
+                             "stock,precio) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id_medicamento",
+                             (m.id_laboratorio, m.id_categoria, m.nombre, m.mg, m.forma, m.requiere_formula,
+                              m.stock_inicial, m.precio)).fetchone()["id_medicamento"]
+            if m.stock_inicial:
+                db.execute("INSERT INTO movimientos_inventario (id_medicamento,id_usuario,tipo,cantidad,motivo) "
+                           "VALUES (%s,%s,'entrada',%s,'Stock inicial')", (mid, user["id_usuario"], m.stock_inicial))
+    except psycopg.errors.ForeignKeyViolation:
+        raise HTTPException(422, "El laboratorio o la categoría no existen.")
+    return medicamento_admin(db, mid)
+
+
+@app.put("/api/medicamentos/{id_medicamento}")
+def editar_medicamento(id_medicamento: int, m: MedicamentoIn, user=Depends(admin_only), db=Depends(get_db)):
+    # El stock no se edita aquí: solo mediante ajustes que quedan registrados.
+    try:
+        with db.transaction():
+            r = db.execute("UPDATE medicamentos SET id_laboratorio=%s,id_categoria=%s,nombre=%s,mg=%s,forma=%s,"
+                           "requiere_formula=%s,precio=%s WHERE id_medicamento=%s RETURNING id_medicamento",
+                           (m.id_laboratorio, m.id_categoria, m.nombre, m.mg, m.forma, m.requiere_formula,
+                            m.precio, id_medicamento)).fetchone()
+    except psycopg.errors.ForeignKeyViolation:
+        raise HTTPException(422, "El laboratorio o la categoría no existen.")
+    if not r:
+        raise HTTPException(404, "Medicamento no encontrado.")
+    return medicamento_admin(db, id_medicamento)
+
+
+@app.patch("/api/medicamentos/{id_medicamento}/stock")
+def ajustar_stock(id_medicamento: int, a: AjusteStock, user=Depends(admin_only), db=Depends(get_db)):
+    with db.transaction():
+        # Mismo bloqueo que reservar_stock(): un ajuste y una venta no se cruzan.
+        m = db.execute("SELECT stock FROM medicamentos WHERE id_medicamento=%s FOR UPDATE", (id_medicamento,)).fetchone()
+        if not m:
+            raise HTTPException(404, "Medicamento no encontrado.")
+        reservado = db.execute("SELECT reservado FROM v_stock_disponible WHERE id_medicamento=%s",
+                               (id_medicamento,)).fetchone()["reservado"]
+        if m["stock"] + a.cantidad < reservado:
+            raise HTTPException(409, f"El stock no puede quedar negativo ni por debajo de lo reservado ({reservado}).")
+        db.execute("UPDATE medicamentos SET stock=stock+%s WHERE id_medicamento=%s", (a.cantidad, id_medicamento))
+        db.execute("INSERT INTO movimientos_inventario (id_medicamento,id_usuario,tipo,cantidad,motivo) "
+                   "VALUES (%s,%s,%s,%s,%s)", (id_medicamento, user["id_usuario"],
+                                              "entrada" if a.cantidad > 0 else "ajuste", a.cantidad, a.motivo))
+    return medicamento_admin(db, id_medicamento)
+
+
+def cambiar_estado(db, id_medicamento, activo):
+    r = db.execute("UPDATE medicamentos SET activo=%s WHERE id_medicamento=%s RETURNING id_medicamento",
+                   (activo, id_medicamento)).fetchone()
+    if not r:
+        raise HTTPException(404, "Medicamento no encontrado.")
+    return medicamento_admin(db, id_medicamento)
+
+
+@app.delete("/api/medicamentos/{id_medicamento}")
+def retirar_medicamento(id_medicamento: int, user=Depends(admin_only), db=Depends(get_db)):
+    # Retiro lógico: los pedidos y comprobantes anteriores conservan su referencia.
+    return cambiar_estado(db, id_medicamento, False)
+
+
+@app.post("/api/medicamentos/{id_medicamento}/reactivar")
+def reactivar_medicamento(id_medicamento: int, user=Depends(admin_only), db=Depends(get_db)):
+    return cambiar_estado(db, id_medicamento, True)
+
+
+@app.get("/api/laboratorios")
+def laboratorios(user=Depends(admin_only), db=Depends(get_db)):
+    return db.execute("SELECT * FROM laboratorios ORDER BY nombre").fetchall()
+
+
+@app.post("/api/laboratorios", status_code=201)
+def crear_laboratorio(lab: LaboratorioIn, user=Depends(admin_only), db=Depends(get_db)):
+    try:
+        return db.execute("INSERT INTO laboratorios (nombre,pais) VALUES (%s,%s) RETURNING *",
+                          (lab.nombre, lab.pais)).fetchone()
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(409, "Ese laboratorio ya existe.")
+
+
+@app.get("/api/categorias")
+def categorias(user=Depends(admin_only), db=Depends(get_db)):
+    return db.execute("SELECT * FROM categorias ORDER BY nombre").fetchall()
+
+
+@app.post("/api/categorias", status_code=201)
+def crear_categoria(c: CategoriaIn, user=Depends(admin_only), db=Depends(get_db)):
+    try:
+        return db.execute("INSERT INTO categorias (nombre) VALUES (%s) RETURNING *", (c.nombre,)).fetchone()
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(409, "Esa categoría ya existe.")
+
+
 @app.get("/api/clientes/yo")
 def mi_cliente(user=Depends(current_user), db=Depends(get_db)):
     if user["rol"] != "cliente":
@@ -221,7 +390,7 @@ def cliente_de_compra(p, user, db):
             raise HTTPException(404, "Cliente no encontrado.")
         return cli
     if user["rol"] != "cliente":
-        raise HTTPException(403, "El administrador solo consulta ventas e inventario.")
+        raise HTTPException(403, "El administrador gestiona inventario; las ventas las registran empleado o cliente.")
     if p.id_cliente is not None or p.cliente is None:
         raise HTTPException(422, "Completa tus datos de cliente.")
     c = p.cliente

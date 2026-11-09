@@ -79,6 +79,26 @@ Los servidores temporales 5174/8001 se cerraron después de las comprobaciones.
 - API publicada únicamente en `127.0.0.1:8000`.
 - Frontend iniciado desde la carpeta original en `127.0.0.1:5173`.
 
+## Actualización — 9 de noviembre de 2026: gestión de inventario
+
+Se implementó el caso de uso **Gestionar Inventario** del administrador: registrar,
+editar, ajustar stock con motivo, retirar y reactivar medicamentos, y crear
+laboratorios y categorías. La prueba que verificaba el retiro de esas rutas se
+sustituyó por pruebas de la nueva funcionalidad.
+
+```text
+19 passed in 12.36s   (PostgreSQL 16.2, base farmacia_test)
+```
+
+Nuevas comprobaciones:
+
+- Solo el administrador gestiona el inventario: empleado y cliente reciben 403; sin sesión, 401.
+- Alta con stock inicial registrada como movimiento `entrada`; visible en el catálogo.
+- Edición de datos y precio sin modificar el stock.
+- Ajustes registrados con usuario y motivo; rechazo de stock negativo o menor que lo reservado.
+- Medicamento retirado: fuera del catálogo y sin ventas nuevas, conservando comprobantes.
+- Ajuste y venta simultáneos sobre la última unidad: solo uno se aplica y el stock queda en cero.
+
 ## Alcance y pendientes
 
 El comprobante es académico e imprimible; no es facturación electrónica ni un cobro.
