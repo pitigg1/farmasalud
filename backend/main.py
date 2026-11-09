@@ -3,9 +3,11 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import List, Literal, Optional
 from uuid import UUID
 
@@ -13,7 +15,9 @@ import jwt
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -200,7 +204,7 @@ def salud(db=Depends(get_db)):
 
 CATALOGO = """
 SELECT m.id_medicamento,m.nombre || COALESCE(' ' || m.mg || 'mg', '') AS nombre,
-       m.forma AS presentacion,m.precio,m.requiere_formula,m.stock AS stock_fisico,
+       m.forma AS presentacion,m.imagen_url,m.precio,m.requiere_formula,m.stock AS stock_fisico,
        v.disponible AS stock,c.nombre AS categoria,l.nombre AS laboratorio,
        CASE WHEN m.requiere_formula THEN 'Requiere Receta'
             WHEN v.disponible <= 5 THEN 'Bajo Stock' END AS etiqueta
@@ -258,7 +262,7 @@ class CategoriaIn(Entrada):
 
 
 INVENTARIO = """
-SELECT m.id_medicamento,m.nombre,m.mg,m.forma,m.requiere_formula,m.precio,m.activo,
+SELECT m.id_medicamento,m.nombre,m.mg,m.forma,m.requiere_formula,m.precio,m.activo,m.imagen_url,
        m.id_laboratorio,l.nombre AS laboratorio,m.id_categoria,c.nombre AS categoria,
        m.stock AS stock_fisico,v.reservado,v.disponible
 FROM medicamentos m JOIN laboratorios l USING (id_laboratorio)
@@ -381,6 +385,84 @@ def crear_categoria(c: CategoriaIn, user=Depends(admin_only), db=Depends(get_db)
         return db.execute("INSERT INTO categorias (nombre) VALUES (%s) RETURNING *", (c.nombre,)).fetchone()
     except psycopg.errors.UniqueViolation:
         raise HTTPException(409, "Esa categoría ya existe.")
+
+
+# ---------- Foto del medicamento (columna imagen_url; el archivo se guarda en IMAGENES_DIR) ----------
+IMAGENES_DIR = Path(os.getenv("IMAGENES_DIR", str(Path(__file__).resolve().parent / "imagenes")))
+IMAGEN_MAX_BYTES = 2 * 1024 * 1024
+IMAGEN_URL = "/api/imagenes/"
+IMAGEN_NOMBRE = re.compile(r"^\d+-[0-9a-f]{16}\.(jpg|png|webp)$")
+IMAGEN_TIPOS = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+
+
+def tipo_imagen(data: bytes) -> Optional[str]:
+    # Se identifica por el contenido real del archivo, no por su nombre ni por el encabezado.
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def borrar_archivo_imagen(url: Optional[str]):
+    nombre = url[len(IMAGEN_URL):] if url and url.startswith(IMAGEN_URL) else ""
+    if IMAGEN_NOMBRE.match(nombre):
+        (IMAGENES_DIR / nombre).unlink(missing_ok=True)
+
+
+def guardar_imagen(db, id_medicamento: int, data: bytes, ext: str):
+    nombre = f"{id_medicamento}-{secrets.token_hex(8)}.{ext}"
+    with db.transaction():
+        actual = db.execute("SELECT imagen_url FROM medicamentos WHERE id_medicamento=%s FOR UPDATE",
+                            (id_medicamento,)).fetchone()
+        if not actual:
+            raise HTTPException(404, "Medicamento no encontrado.")
+        IMAGENES_DIR.mkdir(parents=True, exist_ok=True)
+        (IMAGENES_DIR / nombre).write_bytes(data)
+        try:
+            db.execute("UPDATE medicamentos SET imagen_url=%s WHERE id_medicamento=%s",
+                       (IMAGEN_URL + nombre, id_medicamento))
+        except Exception:
+            (IMAGENES_DIR / nombre).unlink(missing_ok=True)
+            raise
+    borrar_archivo_imagen(actual["imagen_url"])  # solo después de confirmar el cambio
+    return medicamento_admin(db, id_medicamento)
+
+
+@app.put("/api/medicamentos/{id_medicamento}/imagen")
+async def subir_imagen(id_medicamento: int, request: Request, user=Depends(admin_only), db=Depends(get_db)):
+    data = bytearray()
+    async for parte in request.stream():
+        data += parte
+        if len(data) > IMAGEN_MAX_BYTES:
+            raise HTTPException(413, "La foto no puede superar 2 MB.")
+    ext = tipo_imagen(bytes(data[:16]))
+    if not ext:
+        raise HTTPException(415, "La foto debe ser JPG, PNG o WebP.")
+    return await run_in_threadpool(guardar_imagen, db, id_medicamento, bytes(data), ext)
+
+
+@app.delete("/api/medicamentos/{id_medicamento}/imagen")
+def quitar_imagen(id_medicamento: int, user=Depends(admin_only), db=Depends(get_db)):
+    with db.transaction():
+        actual = db.execute("SELECT imagen_url FROM medicamentos WHERE id_medicamento=%s FOR UPDATE",
+                            (id_medicamento,)).fetchone()
+        if not actual:
+            raise HTTPException(404, "Medicamento no encontrado.")
+        db.execute("UPDATE medicamentos SET imagen_url=NULL WHERE id_medicamento=%s", (id_medicamento,))
+    borrar_archivo_imagen(actual["imagen_url"])
+    return medicamento_admin(db, id_medicamento)
+
+
+@app.get("/api/imagenes/{nombre}")
+def ver_imagen(nombre: str):
+    ruta = IMAGENES_DIR / nombre
+    if not IMAGEN_NOMBRE.match(nombre) or not ruta.is_file():
+        raise HTTPException(404, "Imagen no encontrada.")
+    return FileResponse(ruta, media_type=IMAGEN_TIPOS[nombre.rsplit(".", 1)[1]],
+                        headers={"Cache-Control": "public, max-age=86400", "X-Content-Type-Options": "nosniff"})
 
 
 # ---------- Generar informe de inventario y ventas (caso de uso del Administrador) ----------

@@ -215,8 +215,9 @@ médicos ni se conecta con un sistema externo.
 
 1. Entra con `admin@farmacia.com`.
 2. Pulsa **+ Nuevo medicamento**: completa nombre, mg, forma, laboratorio,
-   categoría, precio y stock inicial. Si falta un laboratorio o una categoría,
-   créalo con **+ nuevo**. El medicamento aparece de inmediato en el catálogo.
+   categoría, precio y stock inicial, y opcionalmente una foto (JPG, PNG o WebP,
+   máximo 2 MB). Si falta un laboratorio o una categoría, créalo con **+ nuevo**
+   dentro del mismo formulario. El medicamento aparece de inmediato en el catálogo.
 3. Usa **Ajustar stock** con una entrada (compra a proveedor) o una salida
    (vencidos, conteo físico) y un motivo. Abre **Movimientos** para ver el registro
    con fecha, tipo, cantidad, motivo y usuario.
@@ -290,6 +291,8 @@ Para revisar el frontend: `cd frontend` y `npm.cmd run build`.
 | DELETE | /api/medicamentos/{id} | Administrador: retiro lógico |
 | POST | /api/medicamentos/{id}/reactivar | Administrador |
 | GET, POST | /api/laboratorios, /api/categorias | Administrador |
+| PUT, DELETE | /api/medicamentos/{id}/imagen | Administrador: subir (cuerpo = archivo) o quitar la foto |
+| GET | /api/imagenes/{nombre} | Público: foto del medicamento |
 | GET | /api/informes?desde=&hasta=&umbral= | Administrador: informe de inventario y ventas |
 
 `POST /api/pedidos` requiere `clave_operacion` (UUID), `metodo_pago` e `items`.
@@ -322,6 +325,10 @@ export JWT_SECRET="$(python3.12 -c 'import secrets; print(secrets.token_urlsafe(
 export CLAVE_INICIAL='elige-una-clave-segura'
 uvicorn main:app --reload --port 8000
 ```
+
+Las fotos de los medicamentos se guardan como archivos en `backend/imagenes/`
+(variable `IMAGENES_DIR`; en Docker, en el volumen `imagenes`) y la base guarda su
+dirección en `medicamentos.imagen_url`. La carpeta está excluida de Git.
 
 Las credenciales de PostgreSQL de `docker-compose.yml` son solo para desarrollo local
 (el puerto se publica únicamente en 127.0.0.1). Conserva los

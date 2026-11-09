@@ -34,7 +34,7 @@ export function Inventario({ auth, onChange }) {
     <p className="err" role="alert">{error}</p>
     <table><thead><tr><th>Medicamento</th><th>Laboratorio</th><th>Categoría</th><th>Precio</th><th>Stock físico</th><th>Reservado</th><th>Disponible</th><th>Estado</th><th>Acciones</th></tr></thead>
       <tbody>{rows.map(m => <tr key={m.id_medicamento} style={m.activo ? null : { opacity: .55 }}>
-        <td><b>{m.nombre}{m.mg ? ` ${m.mg}mg` : ''}</b><br /><small className="mute">{m.forma || '—'}{m.requiere_formula ? ' · Requiere fórmula' : ''}</small></td>
+        <td><div className="med-cell"><div className="thumb">{m.imagen_url ? <img src={m.imagen_url} alt="" /> : '💊'}</div><div><b>{m.nombre}{m.mg ? ` ${m.mg}mg` : ''}</b><br /><small className="mute">{m.forma || '—'}{m.requiere_formula ? ' · Requiere fórmula' : ''}</small></div></div></td>
         <td>{m.laboratorio}</td><td>{m.categoria}</td><td>{fmt(m.precio)}</td>
         <td>{m.stock_fisico}</td><td>{m.reservado}</td><td>{m.disponible}</td>
         <td><span className="est" style={m.activo ? null : { background: '#FEE2E2', color: '#B91C1C' }}>{m.activo ? 'Activo' : 'Retirado'}</span></td>
@@ -54,38 +54,115 @@ export function Inventario({ auth, onChange }) {
   </section>
 }
 
+const TIPOS_FOTO = ['image/jpeg', 'image/png', 'image/webp']
+const MAX_FOTO = 2 * 1024 * 1024
+
+async function subirFoto(auth, id, file) {
+  const r = await fetch(`/api/medicamentos/${id}/imagen`, { method: 'PUT', body: file,
+    headers: { 'Content-Type': file.type, Authorization: `Bearer ${auth.token}` } })
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}))
+    throw new Error(typeof d.detail === 'string' ? d.detail : 'No se pudo subir la foto.')
+  }
+}
+
+// Alta de laboratorio o categoría dentro del mismo formulario (sin ventanas del navegador).
+function NuevaReferencia({ auth, tipo, onCreated, onCancel }) {
+  const lab = tipo === 'laboratorios'
+  const [nombre, setNombre] = useState('')
+  const [pais, setPais] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const agregar = async () => {
+    if (!nombre.trim()) return setError(`Escribe el nombre ${lab ? 'del laboratorio' : 'de la categoría'}.`)
+    setBusy(true); setError('')
+    try {
+      const body = { nombre: nombre.trim(), ...(lab && pais.trim() ? { pais: pais.trim() } : {}) }
+      const r = await api('/' + tipo, { method: 'POST', token: auth.token, body })
+      onCreated(lab ? r.id_laboratorio : r.id_categoria)
+    } catch (x) { setError(x.message) } finally { setBusy(false) }
+  }
+  const enter = e => { if (e.key === 'Enter') { e.preventDefault(); agregar() } if (e.key === 'Escape') { e.preventDefault(); onCancel() } }
+  return <div className="subform">
+    <b>{lab ? 'Nuevo laboratorio' : 'Nueva categoría'}</b>
+    <div className={lab ? 'two' : ''}>
+      <div><label htmlFor="r-nombre">Nombre</label><input id="r-nombre" autoFocus maxLength={100} disabled={busy} value={nombre} onChange={e => setNombre(e.target.value)} onKeyDown={enter} /></div>
+      {lab && <div><label htmlFor="r-pais">País (opcional)</label><input id="r-pais" maxLength={50} disabled={busy} value={pais} onChange={e => setPais(e.target.value)} onKeyDown={enter} /></div>}
+    </div>
+    {error && <p className="err" role="alert">{error}</p>}
+    <div className="subform-acts"><button type="button" className="link" onClick={onCancel} disabled={busy}>Cancelar</button>
+      <button type="button" className="yel" onClick={agregar} disabled={busy}>{busy ? 'Agregando…' : 'Agregar'}</button></div>
+  </div>
+}
+
 function MedForm({ auth, value, labs, cats, close, onSaved, reloadRefs }) {
   const [f, setF] = useState(value)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [ref, setRef] = useState(null)          // 'laboratorios' | 'categorias' | null
+  const [foto, setFoto] = useState(null)        // archivo nuevo elegido
+  const [quitar, setQuitar] = useState(false)   // quitar la foto actual
+  const [preview, setPreview] = useState(null)
   const nuevo = !f.id
   const set = (k, v) => setF(x => ({ ...x, [k]: v }))
-  const addRef = async tipo => {
-    const nombre = prompt(tipo === 'laboratorios' ? 'Nombre del nuevo laboratorio' : 'Nombre de la nueva categoría')
-    if (!nombre?.trim()) return
-    const body = { nombre: nombre.trim() }
-    if (tipo === 'laboratorios') { const pais = prompt('País del laboratorio (opcional)'); if (pais?.trim()) body.pais = pais.trim() }
-    try { const r = await api('/' + tipo, { method: 'POST', token: auth.token, body }); await reloadRefs(); set(tipo === 'laboratorios' ? 'id_laboratorio' : 'id_categoria', tipo === 'laboratorios' ? r.id_laboratorio : r.id_categoria) }
-    catch (x) { setError(x.message) }
+  useEffect(() => {
+    if (!foto) { setPreview(null); return }
+    const url = URL.createObjectURL(foto); setPreview(url)
+    return () => URL.revokeObjectURL(url)
+  }, [foto])
+  const fotoActual = preview || (!quitar && value.imagen_url) || null
+
+  const elegirFoto = e => {
+    const file = e.target.files[0]; e.target.value = ''
+    if (!file) return
+    if (!TIPOS_FOTO.includes(file.type)) return setError('La foto debe ser JPG, PNG o WebP.')
+    if (file.size > MAX_FOTO) return setError('La foto no puede superar 2 MB.')
+    setError(''); setFoto(file); setQuitar(false)
   }
+  const creada = async (campo, id) => { await reloadRefs(); set(campo, String(id)); setRef(null) }
+
   const submit = async e => {
     e.preventDefault(); setBusy(true); setError('')
     const body = { id_laboratorio: +f.id_laboratorio, id_categoria: +f.id_categoria, nombre: f.nombre, mg: f.mg === '' ? null : +f.mg,
       forma: f.forma.trim() || null, requiere_formula: f.requiere_formula, precio: +f.precio, ...(nuevo ? { stock_inicial: +f.stock_inicial } : {}) }
-    try { await api(nuevo ? '/medicamentos' : `/medicamentos/${f.id}`, { method: nuevo ? 'POST' : 'PUT', token: auth.token, body }); onSaved() }
-    catch (x) { setError(x.message) } finally { setBusy(false) }
+    let id = f.id
+    try {
+      const med = await api(nuevo ? '/medicamentos' : `/medicamentos/${f.id}`, { method: nuevo ? 'POST' : 'PUT', token: auth.token, body })
+      id = med.id_medicamento
+      if (foto) await subirFoto(auth, id, foto)
+      else if (quitar && value.imagen_url) await api(`/medicamentos/${id}/imagen`, { method: 'DELETE', token: auth.token })
+      onSaved()
+    } catch (x) {
+      // Si el medicamento ya se guardó y solo falló la foto, el formulario pasa a modo edición.
+      if (id && nuevo) { set('id', id); setError('El medicamento se guardó, pero la foto no: ' + x.message) }
+      else setError(x.message)
+    } finally { setBusy(false) }
   }
+
   return <div className="scrim"><form className="modal w" onSubmit={submit}>
     <button type="button" className="x" onClick={close} aria-label="Cerrar">×</button><h2>{nuevo ? 'Nuevo medicamento' : 'Editar medicamento'}</h2>
     <fieldset disabled={busy}>
+      <div className="foto-row">
+        <div className="foto-prev">{fotoActual ? <img src={fotoActual} alt="Foto del medicamento" /> : <span>📷</span>}</div>
+        <div>
+          <b>Foto del medicamento</b>
+          <p className="mute">JPG, PNG o WebP · máximo 2 MB. Es opcional.</p>
+          <label className="file-btn">{fotoActual ? 'Cambiar foto' : 'Elegir foto'}<input type="file" accept={TIPOS_FOTO.join(',')} onChange={elegirFoto} /></label>
+          {fotoActual && <button type="button" className="link" onClick={() => { setFoto(null); setQuitar(true) }}>Quitar foto</button>}
+        </div>
+      </div>
       <label htmlFor="m-nombre">Nombre</label><input id="m-nombre" required maxLength={150} value={f.nombre} onChange={e => set('nombre', e.target.value)} />
       <div className="two">
         <div><label htmlFor="m-mg">Concentración (mg)</label><input id="m-mg" type="number" min="1" value={f.mg} onChange={e => set('mg', e.target.value)} /></div>
         <div><label htmlFor="m-forma">Forma</label><input id="m-forma" maxLength={50} placeholder="Tableta, Cápsula…" value={f.forma} onChange={e => set('forma', e.target.value)} /></div>
-        <div><label htmlFor="m-lab">Laboratorio <button type="button" className="link" onClick={() => addRef('laboratorios')}>+ nuevo</button></label>
+        <div><label htmlFor="m-lab">Laboratorio <button type="button" className="link" onClick={() => setRef('laboratorios')}>+ nuevo</button></label>
           <select id="m-lab" required value={f.id_laboratorio} onChange={e => set('id_laboratorio', e.target.value)}><option value="">Selecciona…</option>{labs.map(l => <option key={l.id_laboratorio} value={l.id_laboratorio}>{l.nombre}</option>)}</select></div>
-        <div><label htmlFor="m-cat">Categoría <button type="button" className="link" onClick={() => addRef('categorias')}>+ nueva</button></label>
+        <div><label htmlFor="m-cat">Categoría <button type="button" className="link" onClick={() => setRef('categorias')}>+ nueva</button></label>
           <select id="m-cat" required value={f.id_categoria} onChange={e => set('id_categoria', e.target.value)}><option value="">Selecciona…</option>{cats.map(c => <option key={c.id_categoria} value={c.id_categoria}>{c.nombre}</option>)}</select></div>
+      </div>
+      {ref && <NuevaReferencia key={ref} auth={auth} tipo={ref} onCancel={() => setRef(null)}
+        onCreated={id => creada(ref === 'laboratorios' ? 'id_laboratorio' : 'id_categoria', id)} />}
+      <div className="two">
         <div><label htmlFor="m-precio">Precio (COP)</label><input id="m-precio" required type="number" min="0" step="0.01" value={f.precio} onChange={e => set('precio', e.target.value)} /></div>
         {nuevo && <div><label htmlFor="m-stock">Stock inicial</label><input id="m-stock" required type="number" min="0" step="1" value={f.stock_inicial} onChange={e => set('stock_inicial', e.target.value)} /></div>}
       </div>

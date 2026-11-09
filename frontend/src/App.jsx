@@ -10,6 +10,7 @@ const TODOS = 'Todos los productos'
 const ART = { 'Analgésicos': ['💊', '#BFDBFE', '#60A5FA'], 'Antibióticos': ['💊', '#FDE68A', '#F59E0B'], 'Vitaminas': ['FarmaSalud', '#6D28D9', '#5B21B6'], 'Antihistamínicos': ['🤧', '#DDD6FE', '#A78BFA'],
   'Pediatría': ['🍼', '#FBCFE8', '#F472B6'], 'Dermofarmacia': ['🧴', '#BBF7D0', '#34D399'], 'Digestivos': ['💧', '#FED7AA', '#FB923C'] }
 const Art = ({ m, sm, children }) => {
+  if (m.imagen_url) return <div className={'art photo' + (sm ? ' sm' : '')}><img src={m.imagen_url} alt={m.nombre} loading="lazy" />{children}</div>
   const a = ART[m.categoria] || ART['Analgésicos']
   return <div className={'art' + (sm ? ' sm' : '') + (a[0].length > 3 && !sm ? ' t' : '')} style={{ background: `linear-gradient(135deg,${a[1]},${a[2]})` }}>{sm ? a[0].slice(0, 2) : a[0]}{children}</div>
 }

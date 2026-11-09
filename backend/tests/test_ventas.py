@@ -413,3 +413,43 @@ def test_warns_accounts_still_using_demo_password(caplog):
     with caplog.at_level("WARNING", logger="uvicorn.error"), TestClient(main.app):
         pass
     assert any("admin@farmacia.com todavía usa" in r.getMessage() for r in caplog.records)
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+JPG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+
+
+def test_medication_photo_upload_replace_and_remove(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "IMAGENES_DIR", tmp_path)
+    admin = headers(client, "admin@farmacia.com")
+    up = lambda data, ctype="image/png", h=admin, mid=1: client.put(
+        f"/api/medicamentos/{mid}/imagen", headers={**h, "Content-Type": ctype}, content=data)
+    r = up(PNG)
+    assert r.status_code == 200, r.text
+    url = r.json()["imagen_url"]
+    assert url.startswith("/api/imagenes/1-") and url.endswith(".png")
+    img = client.get(url)  # pública, como el catálogo
+    assert img.status_code == 200 and img.content == PNG and img.headers["content-type"] == "image/png"
+    assert [m["imagen_url"] for m in client.get("/api/medicamentos").json() if m["id_medicamento"] == 1] == [url]
+    # Reemplazar borra el archivo anterior.
+    url2 = up(JPG, "image/jpeg").json()["imagen_url"]
+    assert url2.endswith(".jpg") and client.get(url).status_code == 404 and len(list(tmp_path.iterdir())) == 1
+    # Quitar la foto deja el campo vacío y borra el archivo.
+    r = client.delete("/api/medicamentos/1/imagen", headers=admin)
+    assert r.status_code == 200 and r.json()["imagen_url"] is None and not list(tmp_path.iterdir())
+
+
+def test_medication_photo_validation(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "IMAGENES_DIR", tmp_path)
+    admin = headers(client, "admin@farmacia.com")
+    up = lambda data, h=admin, mid=1: client.put(
+        f"/api/medicamentos/{mid}/imagen", headers={**h, "Content-Type": "image/png"}, content=data)
+    assert up(b"<svg onload=alert(1)>").status_code == 415           # no es una imagen permitida
+    assert up(b"GIF89a" + b"\x00" * 20).status_code == 415
+    assert up(PNG + b"\x00" * (2 * 1024 * 1024)).status_code == 413  # más de 2 MB
+    assert up(PNG, mid=9999).status_code == 404
+    assert up(PNG, h=headers(client)).status_code == 403             # empleado
+    assert client.put("/api/medicamentos/1/imagen", content=PNG).status_code == 401
+    assert not list(tmp_path.iterdir())
+    for nombre in ("..%2F..%2Fmain.py", "main.py", "1-zz.png"):
+        assert client.get(f"/api/imagenes/{nombre}").status_code == 404

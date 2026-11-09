@@ -24,9 +24,13 @@ services:
       # Valores tomados del archivo .env (ver .env.example); nunca fijos en el código.
       JWT_SECRET: ${JWT_SECRET:-}
       CLAVE_INICIAL: ${CLAVE_INICIAL:-}
+      IMAGENES_DIR: /app/imagenes
     ports: ["127.0.0.1:8000:8000"]
+    volumes:
+      - imagenes:/app/imagenes   # fotos de medicamentos; se conservan al reconstruir
     depends_on:
       db:
         condition: service_healthy
 volumes:
   pgdata:
+  imagenes:

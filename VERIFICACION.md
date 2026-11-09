@@ -127,6 +127,24 @@ En el navegador (Edge, Vite 7.3.8): `farmacia123` fue rechazada, se ingresó con
 contraseña aleatoria generada, se cambió la contraseña y se ingresó con la nueva,
 sin errores de JavaScript.
 
+## Actualización — 9 de noviembre de 2026: fotos y formulario de inventario
+
+- **Fotos de medicamentos:** el administrador sube, cambia o quita la foto (JPG, PNG o WebP,
+  máximo 2 MB). El tipo se valida por el contenido del archivo, no por su nombre. La foto se
+  muestra en el catálogo, el carrito y la tabla de inventario; sin foto se mantiene la
+  ilustración por categoría. Se usa la columna existente `imagen_url` (sin cambios al modelo).
+- **Laboratorio y categoría nuevos:** se crean dentro del formulario del medicamento, con el
+  estilo de la aplicación, en lugar de las ventanas `prompt()` del navegador.
+
+```text
+26 passed   (PostgreSQL 16.2, base farmacia_test)
+```
+
+Pruebas nuevas: subir, reemplazar (borra el archivo anterior) y quitar la foto; rechazo de
+archivos que no son imagen (incluido SVG) o superan 2 MB; permisos; nombres de archivo
+manipulados en `/api/imagenes`. En Edge: alta de laboratorio y categoría en el formulario,
+alta con foto y visualización en inventario y catálogo, sin errores ni ventanas emergentes.
+
 ## Alcance y pendientes
 
 El comprobante es académico e imprimible; no es facturación electrónica ni un cobro.
