@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import main
 
+CLAVE_PRUEBAS = "clave-de-pruebas-segura"
 TEST_DSN = os.getenv("TEST_DATABASE_URL", "postgresql://farmacia:farmacia@127.0.0.1:5433/farmacia_test")
 
 
@@ -35,6 +36,7 @@ def isolated_database(monkeypatch):
         conn.execute("DROP SCHEMA IF EXISTS farmacia CASCADE")
         conn.execute((ROOT / "schema.sql").read_text(encoding="utf-8-sig"))
     monkeypatch.setattr(main, "DSN", TEST_DSN)
+    monkeypatch.setattr(main, "CLAVE_INICIAL", CLAVE_PRUEBAS)
 
 
 @pytest.fixture
@@ -44,7 +46,7 @@ def client():
 
 
 def headers(client, correo="empleado@farmacia.com"):
-    response = client.post("/api/auth/login", json={"correo": correo, "password": "farmacia123"})
+    response = client.post("/api/auth/login", json={"correo": correo, "password": CLAVE_PRUEBAS})
     assert response.status_code == 200, response.text
     return {"Authorization": "Bearer " + response.json()["token"]}
 
@@ -109,7 +111,7 @@ def test_customer_purchase_and_permissions(client):
 
 
 def test_customer_cannot_overwrite_existing_document(client):
-    login = client.post("/api/auth/register", json={"correo": "otra@example.com", "password": "123456"}).json()
+    login = client.post("/api/auth/register", json={"correo": "otra@example.com", "password": "clave-otra-123"}).json()
     auth = {"Authorization": "Bearer " + login["token"]}
     body = order()
     del body["id_cliente"]
@@ -375,3 +377,39 @@ def test_report_validation_and_permissions(client):
            {"umbral": -1}, {"desde": "no-es-fecha"}]
     for params in bad:
         assert client.get("/api/informes", headers=admin, params=params).status_code == 422, params
+
+
+def test_initial_password_and_password_change(client):
+    # La contraseña antigua de demostración ya no da acceso a las cuentas precargadas.
+    old = client.post("/api/auth/login", json={"correo": "admin@farmacia.com", "password": "farmacia123"})
+    assert old.status_code == 401
+    auth = headers(client, "admin@farmacia.com")
+    url = "/api/auth/cambiar-clave"
+    assert client.post(url, json={"actual": CLAVE_PRUEBAS, "nueva": "otra-clave-123"}).status_code == 401
+    assert client.post(url, headers=auth, json={"actual": "incorrecta", "nueva": "otra-clave-123"}).status_code == 400
+    for nueva in ("corta", "farmacia123", CLAVE_PRUEBAS):
+        assert client.post(url, headers=auth, json={"actual": CLAVE_PRUEBAS, "nueva": nueva}).status_code == 422, nueva
+    assert client.post(url, headers=auth, json={"actual": CLAVE_PRUEBAS, "nueva": "otra-clave-123"}).status_code == 204
+    login = lambda pw: client.post("/api/auth/login", json={"correo": "admin@farmacia.com", "password": pw}).status_code
+    assert (login(CLAVE_PRUEBAS), login("otra-clave-123")) == (401, 200)
+    # Registro de clientes: mínimo 8 caracteres.
+    reg = lambda pw: client.post("/api/auth/register", json={"correo": "nuevo@mail.com", "password": pw}).status_code
+    assert (reg("1234"), reg("farmacia123"), reg("clave-cliente-1")) == (422, 422, 201)
+
+
+def test_random_initial_password_when_not_configured(monkeypatch, caplog):
+    monkeypatch.setattr(main, "CLAVE_INICIAL", "")
+    with caplog.at_level("WARNING", logger="uvicorn.error"), TestClient(main.app) as c:
+        line = next(r.getMessage() for r in caplog.records if "Contraseña inicial" in r.getMessage())
+        clave = line.split(": ")[1].split("  ")[0]
+        assert len(clave) >= 12 and clave != "farmacia123"
+        r = c.post("/api/auth/login", json={"correo": "empleado@farmacia.com", "password": clave})
+        assert r.status_code == 200
+
+
+def test_warns_accounts_still_using_demo_password(caplog):
+    with db() as conn:
+        conn.execute("UPDATE usuarios SET password_hash=%s WHERE correo='admin@farmacia.com'", (main.hash_pw("farmacia123"),))
+    with caplog.at_level("WARNING", logger="uvicorn.error"), TestClient(main.app):
+        pass
+    assert any("admin@farmacia.com todavía usa" in r.getMessage() for r in caplog.records)

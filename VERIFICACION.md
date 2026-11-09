@@ -106,6 +106,27 @@ Nuevas comprobaciones:
 También se revisó en navegador (Microsoft Edge): alta, ajuste y movimientos de un medicamento,
 y generación e impresión a PDF del informe, sin errores de JavaScript.
 
+## Actualización — 9 de noviembre de 2026: seguridad
+
+- **Clave JWT:** se eliminó el valor fijo del código. La API exige `JWT_SECRET` de 32 o más
+  caracteres (si es más corta no arranca); si falta, usa una clave aleatoria temporal.
+- **Contraseñas:** se eliminó `farmacia123`. Las cuentas precargadas reciben `CLAVE_INICIAL`
+  o una contraseña aleatoria que se muestra en el registro de la API. La API advierte al
+  iniciar si alguna cuenta todavía usa la contraseña antigua. Se agregó el cambio de
+  contraseña (botón 🔑, `POST /api/auth/cambiar-clave`) y el registro exige 8 caracteres.
+- **Dependencias:** Vite 5.4 → 7.3.8 y @vitejs/plugin-react 4 → 5.2. `npm audit`:
+  **0 vulnerabilidades** (antes 1 moderada y 1 alta, en esbuild y Vite). Requiere Node 20.19+.
+- **Configuración:** `.env.example` documenta las variables; `.env` no se sube a Git.
+  El README ya no contiene rutas de un equipo particular.
+
+```text
+24 passed   (PostgreSQL 16.2, base farmacia_test)
+```
+
+En el navegador (Edge, Vite 7.3.8): `farmacia123` fue rechazada, se ingresó con la
+contraseña aleatoria generada, se cambió la contraseña y se ingresó con la nueva,
+sin errores de JavaScript.
+
 ## Alcance y pendientes
 
 El comprobante es académico e imprimible; no es facturación electrónica ni un cobro.
@@ -115,6 +136,5 @@ pgAdmin no se instaló ni configuró en el equipo: los pasos y credenciales de c
 están en README y las consultas preparadas en `backend/demo_consultas.sql`.
 La impresión tiene estilos específicos; no se realizó una impresión física.
 
-Se mantuvieron las versiones principales del prototipo. `npm ci` reportó dos avisos
-de seguridad en dependencias (uno moderado y uno alto); su actualización requiere
-una revisión separada antes de publicar el proyecto fuera de este entorno local.
+Los dos avisos de seguridad de `npm ci` se corrigieron el 9 de noviembre de 2026
+(ver la actualización de seguridad).

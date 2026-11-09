@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 from datetime import date, datetime, timedelta, timezone
@@ -17,8 +18,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DSN = os.getenv("DATABASE_URL", "postgresql://farmacia:farmacia@127.0.0.1:5433/farmacia")
-SECRET = os.getenv("JWT_SECRET", "cambia-esto-en-produccion")
-DEV_PASSWORD = "farmacia123"
+log = logging.getLogger("uvicorn.error")
+
+# Clave para firmar los tokens JWT. Sin variable de entorno se genera una aleatoria
+# (las sesiones se cierran al reiniciar la API). Nunca se usa un valor fijo del código.
+SECRET = os.getenv("JWT_SECRET", "")
+if not SECRET:
+    SECRET = secrets.token_urlsafe(32)
+    log.warning("JWT_SECRET no está definida: se usa una clave temporal aleatoria.")
+elif len(SECRET) < 32:
+    raise RuntimeError("JWT_SECRET debe tener al menos 32 caracteres. Genera una con: "
+                       "python -c \"import secrets; print(secrets.token_urlsafe(32))\"")
+
+# Contraseña inicial de las cuentas precargadas (marcador REEMPLAZAR_POR_HASH en schema.sql).
+CLAVE_INICIAL = os.getenv("CLAVE_INICIAL", "")
+CLAVE_DEMO_ANTIGUA = "farmacia123"  # solo para advertir si una cuenta aún la usa
 app = FastAPI(title="API FarmaSalud", version="0.3.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"],
                    allow_methods=["*"], allow_headers=["*"])
@@ -46,12 +60,24 @@ def check_pw(pw: str, stored: str) -> bool:
 
 @app.on_event("startup")
 def fijar_hashes():
-    # Solo sustituye los marcadores de las cuentas de demostración.
+    # Solo sustituye los marcadores de las cuentas precargadas; no toca contraseñas ya definidas.
     with connect() as db, db.transaction():
         db.execute("SELECT clave_operacion, comprobante FROM pedidos LIMIT 0")
-        for u in db.execute("SELECT id_usuario FROM usuarios WHERE password_hash='REEMPLAZAR_POR_HASH'").fetchall():
-            db.execute("UPDATE usuarios SET password_hash=%s WHERE id_usuario=%s",
-                       (hash_pw(DEV_PASSWORD), u["id_usuario"]))
+        pendientes = db.execute("SELECT id_usuario,correo FROM usuarios "
+                                "WHERE password_hash='REEMPLAZAR_POR_HASH'").fetchall()
+        if pendientes:
+            clave = CLAVE_INICIAL or secrets.token_urlsafe(12)
+            if len(clave) < 8 or clave.lower() == CLAVE_DEMO_ANTIGUA:
+                raise RuntimeError("CLAVE_INICIAL debe tener al menos 8 caracteres y no ser farmacia123.")
+            for u in pendientes:
+                db.execute("UPDATE usuarios SET password_hash=%s WHERE id_usuario=%s", (hash_pw(clave), u["id_usuario"]))
+            if not CLAVE_INICIAL:
+                log.warning("Contraseña inicial de %s: %s  (cámbiala después de iniciar sesión)",
+                            ", ".join(u["correo"] for u in pendientes), clave)
+        for u in db.execute("SELECT correo,password_hash FROM usuarios WHERE activo "
+                            "AND (rol IN ('admin','empleado') OR correo='cliente@mail.com')").fetchall():
+            if check_pw(CLAVE_DEMO_ANTIGUA, u["password_hash"]):
+                log.warning("La cuenta %s todavía usa la contraseña de demostración: cámbiala.", u["correo"])
 
 
 def current_user(authorization: str = Header(default=""), db=Depends(get_db)):
@@ -82,7 +108,16 @@ class Entrada(BaseModel):
 
 class Credenciales(Entrada):
     correo: str = Field(pattern=r"^\S+@\S+\.\S+$", max_length=100)
-    password: str = Field(min_length=4, max_length=128)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class Registro(Credenciales):
+    password: str = Field(min_length=8, max_length=128)
+
+
+class CambioClave(Entrada):
+    actual: str = Field(min_length=1, max_length=128)
+    nueva: str = Field(min_length=8, max_length=128)
 
 
 class ClienteIn(Entrada):
@@ -127,7 +162,9 @@ def token_for(u):
 
 
 @app.post("/api/auth/register", status_code=201)
-def register(c: Credenciales, db=Depends(get_db)):
+def register(c: Registro, db=Depends(get_db)):
+    if c.password.lower() == CLAVE_DEMO_ANTIGUA:
+        raise HTTPException(422, "Elige una contraseña diferente.")
     try:
         with db.transaction():
             u = db.execute("INSERT INTO usuarios (correo,password_hash,rol) VALUES (%s,%s,'cliente') RETURNING *",
@@ -143,6 +180,16 @@ def login(c: Credenciales, db=Depends(get_db)):
     if not u or not check_pw(c.password, u["password_hash"]):
         raise HTTPException(401, "Correo o contraseña incorrectos.")
     return token_for(u)
+
+
+@app.post("/api/auth/cambiar-clave", status_code=204)
+def cambiar_clave(c: CambioClave, user=Depends(current_user), db=Depends(get_db)):
+    actual = db.execute("SELECT password_hash FROM usuarios WHERE id_usuario=%s", (user["id_usuario"],)).fetchone()
+    if not check_pw(c.actual, actual["password_hash"]):
+        raise HTTPException(400, "La contraseña actual no es correcta.")
+    if c.nueva == c.actual or c.nueva.lower() == CLAVE_DEMO_ANTIGUA:
+        raise HTTPException(422, "Elige una contraseña nueva y diferente.")
+    db.execute("UPDATE usuarios SET password_hash=%s WHERE id_usuario=%s", (hash_pw(c.nueva), user["id_usuario"]))
 
 
 @app.get("/api/salud")

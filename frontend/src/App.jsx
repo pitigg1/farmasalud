@@ -60,7 +60,8 @@ export default function App() {
         {role === 'cliente' && <button className="bag" aria-label="Carrito" onClick={() => setDrawer(true)}>🛍<b>{count}</b></button>}
         {auth ? (
           <div className="user"><div className="av">{name.slice(0, 2).toUpperCase()}</div><div><b>{name}</b><span className="chip">{chipLabel}</span></div>
-            <button className="out" aria-label="Cerrar sesión" onClick={() => { setAuth(null); setCart({}); setOrder(null); setModal(null); setHistory(false); setReport(false); setDrawer(false); say('Sesión cerrada') }}>⎋</button></div>
+            <button className="out" aria-label="Cambiar contraseña" title="Cambiar contraseña" onClick={() => setModal('clave')}>🔑</button>
+            <button className="out" aria-label="Cerrar sesión" title="Cerrar sesión" onClick={() => { setAuth(null); setCart({}); setOrder(null); setModal(null); setHistory(false); setReport(false); setDrawer(false); say('Sesión cerrada') }}>⎋</button></div>
         ) : <button className="yel" onClick={() => setModal('login')}>Iniciar sesión</button>}
       </header>
 
@@ -134,6 +135,7 @@ export default function App() {
         </div>
       )}
       {modal === 'login' && <Login close={() => setModal(null)} onAuth={(a, t) => { setAuth(a); setModal(null); if (a.rol !== 'cliente') setCart({}); else if (ids.length) setDrawer(true); setHistory(false); say(t) }} />}
+      {modal === 'clave' && auth && <CambiarClave auth={auth} close={() => setModal(null)} onDone={() => { setModal(null); say('Contraseña actualizada') }} />}
       {modal === 'checkout' && <Checkout cart={cart} ids={ids} med={med} auth={auth} reload={loadMeds} close={() => setModal(null)}
         onDone={o => { setOrder(o.id_pedido); setCart({}); setModal(null); loadMeds() }} />}
       {order !== null && <Receipt id={order} auth={auth} close={() => setOrder(null)} />}
@@ -158,6 +160,7 @@ function Login({ close, onAuth }) {
       <form className="mb" onSubmit={submit} noValidate>
         <label htmlFor="c">Correo Electrónico</label><input id="c" type="email" placeholder="usuario@mail.com" value={f.correo} onChange={e => setF({ ...f, correo: e.target.value })} />
         <label htmlFor="p">Contraseña</label><input id="p" type="password" placeholder="••••••••" value={f.password} onChange={e => setF({ ...f, password: e.target.value })} />
+        {reg && <p className="mute" style={{ fontSize: '.8rem', margin: '6px 0 0' }}>Mínimo 8 caracteres.</p>}
         <p className="err">{err}</p>
         <button className="yel full">{reg ? 'REGISTRARME' : 'INICIAR SESIÓN'}</button>
         <p className="mute" style={{ textAlign: 'center', margin: '16px 0 0', fontSize: '.85rem' }}>{reg ? '¿Ya tienes cuenta? ' : '¿No tienes cuenta? '}
@@ -166,3 +169,28 @@ function Login({ close, onAuth }) {
   )
 }
 
+
+function CambiarClave({ auth, close, onDone }) {
+  const [f, setF] = useState({ actual: '', nueva: '', repetir: '' })
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const submit = async e => {
+    e.preventDefault(); setErr('')
+    if (f.nueva !== f.repetir) return setErr('Las contraseñas nuevas no coinciden.')
+    setBusy(true)
+    try { await api('/auth/cambiar-clave', { method: 'POST', token: auth.token, body: { actual: f.actual, nueva: f.nueva } }); onDone() }
+    catch (x) { setErr(x.message) } finally { setBusy(false) }
+  }
+  const field = (k, label) => <><label htmlFor={'k-' + k}>{label}</label><input id={'k-' + k} type="password" required minLength={k === 'actual' ? 1 : 8} maxLength={128} value={f[k]} onChange={e => setF({ ...f, [k]: e.target.value })} /></>
+  return (
+    <div className="scrim" onClick={close}><div className="modal" onClick={e => e.stopPropagation()}>
+      <div className="mh"><button className="x" onClick={close} aria-label="Cerrar">✕</button><i>🔑</i><h2>Cambiar contraseña</h2><p>{auth.correo}</p></div>
+      <form className="mb" onSubmit={submit}>
+        <fieldset disabled={busy}>
+          {field('actual', 'Contraseña actual')}{field('nueva', 'Contraseña nueva (mínimo 8 caracteres)')}{field('repetir', 'Repite la contraseña nueva')}
+          <p className="err" role="alert">{err}</p>
+          <button className="yel full">{busy ? 'Guardando…' : 'GUARDAR'}</button>
+        </fieldset>
+      </form></div></div>
+  )
+}

@@ -30,7 +30,8 @@ frontend/src/
 
 ## Activar el proyecto en Windows (PowerShell)
 
-Requisitos: Docker Desktop abierto y con el motor activo, Node.js con npm.
+Requisitos: Docker Desktop abierto y con el motor activo, Node.js 20.19 o superior con npm.
+En los comandos, reemplaza `<carpeta del proyecto>` por la ruta donde descargaste el proyecto.
 Para ejecutar la API directamente en Windows utiliza **Python 3.12**. El entorno
 anterior creado con Python 3.14 no sirve para estas versiones fijadas; puedes
 usar la alternativa Docker del paso 3 y conservar ese entorno anterior.
@@ -38,7 +39,7 @@ usar la alternativa Docker del paso 3 y conservar ese entorno anterior.
 ### 1. Abrir la carpeta y levantar PostgreSQL
 
 ```powershell
-cd "C:\Users\ortis\Documents\Software_II\Nueva carpeta\farmasalud-main\farmasalud-main"
+cd "<carpeta del proyecto>"
 docker info
 docker compose up -d db
 docker compose ps
@@ -69,9 +70,23 @@ elimina el volumen. Para apagar conservando registros usa `docker compose stop`.
 
 ### 3. Iniciar la API (elige una alternativa)
 
+Antes, define las claves de seguridad. La API **no trae claves fijas**:
+
+- `JWT_SECRET`: firma las sesiones; mínimo 32 caracteres. Si falta, la API usa una
+  clave temporal y las sesiones se cierran cada vez que se reinicia.
+- `CLAVE_INICIAL`: contraseña de las cuentas precargadas en una base **nueva**;
+  mínimo 8 caracteres. Si falta, la API genera una aleatoria y la muestra en su registro.
+
+Para generar una clave segura: `py -3.12 -c "import secrets; print(secrets.token_urlsafe(32))"`.
+
 **A. Docker: no requiere instalar Python en Windows.**
 
+Copia `.env.example` como `.env` en la carpeta raíz y completa los dos valores
+(Docker Compose lee ese archivo; `.env` no se sube a Git).
+
 ```powershell
+Copy-Item .env.example .env
+notepad .env
 docker compose --profile app up -d --build api
 docker compose logs --tail 30 api
 ```
@@ -85,11 +100,12 @@ Instala Python 3.12 si no está disponible y verifica `py -3.12 --version`.
 La carpeta `.venv312` evita reemplazar tu entorno anterior.
 
 ```powershell
-cd "C:\Users\ortis\Documents\Software_II\Nueva carpeta\farmasalud-main\farmasalud-main\backend"
+cd "<carpeta del proyecto>\backend"
 py -3.12 -m venv .venv312
 .\.venv312\Scripts\python.exe -m pip install -r requirements.txt
 $env:DATABASE_URL = "postgresql://farmacia:farmacia@127.0.0.1:5433/farmacia"
-$env:JWT_SECRET = "farmasalud-demo-local-cambiar"
+$env:JWT_SECRET = .\.venv312\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+$env:CLAVE_INICIAL = "elige-una-clave-segura"
 .\.venv312\Scripts\python.exe -m uvicorn main:app --reload --port 8000
 ```
 
@@ -104,7 +120,7 @@ Verifica [salud de la API](http://localhost:8000/api/salud),
 ### 4. Iniciar React en otra terminal
 
 ```powershell
-cd "C:\Users\ortis\Documents\Software_II\Nueva carpeta\farmasalud-main\farmasalud-main\frontend"
+cd "<carpeta del proyecto>\frontend"
 npm.cmd ci
 npm.cmd run dev
 ```
@@ -113,17 +129,22 @@ Abre [FarmaSalud](http://localhost:5173). Vite envía `/api` a FastAPI en el pue
 8000. Si el 5173 está ocupado, cierra el servidor anterior; Vite no cambiará de
 puerto silenciosamente.
 
-### 5. Cuentas de demostración
+### 5. Cuentas precargadas
 
 | Correo | Contraseña inicial | Función |
 |---|---|---|
-| cliente@mail.com | farmacia123 | Compra propia e historial |
-| empleado@farmacia.com | farmacia123 | Registro de clientes y venta presencial |
-| admin@farmacia.com | farmacia123 | Gestión de inventario, ventas e informes |
+| cliente@mail.com | `CLAVE_INICIAL` | Compra propia e historial |
+| empleado@farmacia.com | `CLAVE_INICIAL` | Registro de clientes y venta presencial |
+| admin@farmacia.com | `CLAVE_INICIAL` | Gestión de inventario, ventas e informes |
 
-La API asigna esa contraseña únicamente a registros que todavía tengan
-`REEMPLAZAR_POR_HASH`; no reemplaza contraseñas ya establecidas.
+La API asigna la contraseña inicial únicamente a registros que todavía tengan
+`REEMPLAZAR_POR_HASH`; no reemplaza contraseñas ya establecidas. Cada usuario puede
+cambiar su contraseña con el botón 🔑 junto a su nombre (mínimo 8 caracteres).
 El rol se verifica contra PostgreSQL en cada solicitud autenticada.
+
+**Si tu base ya existía** con la contraseña antigua de demostración (`farmacia123`),
+esa contraseña sigue funcionando hasta que la cambies: la API muestra una advertencia
+al iniciar por cada cuenta que todavía la usa. Inicia sesión con ella y cámbiala con 🔑.
 
 ## Conectar pgAdmin 4 instalado en Windows
 
@@ -297,10 +318,12 @@ python3.12 -m venv .venv312
 source .venv312/bin/activate
 pip install -r requirements.txt
 export DATABASE_URL='postgresql://farmacia:farmacia@127.0.0.1:5433/farmacia'
-export JWT_SECRET='farmasalud-demo-local-cambiar'
+export JWT_SECRET="$(python3.12 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export CLAVE_INICIAL='elige-una-clave-segura'
 uvicorn main:app --reload --port 8000
 ```
 
-Las credenciales y la clave de ejemplo son para desarrollo local. Conserva los
+Las credenciales de PostgreSQL de `docker-compose.yml` son solo para desarrollo local
+(el puerto se publica únicamente en 127.0.0.1). Conserva los
 respaldos fuera del repositorio; `backups/` está excluido por `.gitignore`.
 

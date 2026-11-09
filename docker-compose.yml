@@ -21,7 +21,9 @@ services:
     build: ./backend
     environment:
       DATABASE_URL: postgresql://farmacia:farmacia@db:5432/farmacia
-      JWT_SECRET: ${JWT_SECRET:-farmasalud-demo-local-cambiar}
+      # Valores tomados del archivo .env (ver .env.example); nunca fijos en el código.
+      JWT_SECRET: ${JWT_SECRET:-}
+      CLAVE_INICIAL: ${CLAVE_INICIAL:-}
     ports: ["127.0.0.1:8000:8000"]
     depends_on:
       db:
