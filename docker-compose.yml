@@ -5,9 +5,26 @@ services:
       POSTGRES_USER: farmacia
       POSTGRES_PASSWORD: farmacia
       POSTGRES_DB: farmacia
-    ports: ["5432:5432"]
+      TZ: America/Bogota
+    ports: ["127.0.0.1:5433:5432"]
     volumes:
       - ./backend/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U farmacia -d farmacia"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  # Alternativa a instalar Python 3.12 en Windows: activar con --profile app.
+  api:
+    profiles: ["app"]
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://farmacia:farmacia@db:5432/farmacia
+      JWT_SECRET: ${JWT_SECRET:-farmasalud-demo-local-cambiar}
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      db:
+        condition: service_healthy
 volumes:
   pgdata:

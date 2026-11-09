@@ -6,6 +6,11 @@ export async function api(path, { method = 'GET', body, token } = {}) {
     body: body ? JSON.stringify(body) : undefined,
   })
   const data = await r.json().catch(() => ({}))
-  if (!r.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Revisa los datos ingresados.')
+  if (!r.ok) {
+    const detail = Array.isArray(data.detail)
+      ? data.detail.map(x => `${x.loc.slice(1).join('.')}: ${x.msg}`).join('; ')
+      : data.detail
+    throw new Error(typeof detail === 'string' ? detail : 'Revisa los datos ingresados.')
+  }
   return data
 }

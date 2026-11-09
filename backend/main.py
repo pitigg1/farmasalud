@@ -1,30 +1,36 @@
-import hashlib, hmac, os, secrets
-from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+import hashlib
+import hmac
+import json
+import os
+import secrets
+from datetime import date, datetime, timedelta, timezone
+from typing import List, Literal, Optional
+from uuid import UUID
 
 import jwt
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-DSN = os.getenv("DATABASE_URL", "postgresql://farmacia:farmacia@localhost:5432/farmacia")
+DSN = os.getenv("DATABASE_URL", "postgresql://farmacia:farmacia@127.0.0.1:5433/farmacia")
 SECRET = os.getenv("JWT_SECRET", "cambia-esto-en-produccion")
-DEV_PASSWORD = "farmacia123"  # contraseña de desarrollo para los usuarios sembrados en farmaciadb.sql
-
-app = FastAPI(title="API Farmacia", version="0.2.0")
+DEV_PASSWORD = "farmacia123"
+app = FastAPI(title="API FarmaSalud", version="0.3.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"],
                    allow_methods=["*"], allow_headers=["*"])
 
 
 def connect():
-    # Todas las tablas viven en el esquema "farmacia" (ver farmaciadb.sql)
-    return psycopg.connect(DSN, row_factory=dict_row, options="-c search_path=farmacia,public")
+    # Las escrituras usan transacciones explícitas: commit ANTES de responder éxito.
+    return psycopg.connect(DSN, autocommit=True, row_factory=dict_row,
+                           options="-c search_path=farmacia,public -c timezone=America/Bogota")
 
 
 def get_db():
-    with connect() as conn:  # commit al salir bien, rollback si hay excepción
+    with connect() as conn:
         yield conn
 
 
@@ -34,92 +40,97 @@ def hash_pw(pw: str, salt: Optional[str] = None) -> str:
 
 
 def check_pw(pw: str, stored: str) -> bool:
-    if "$" not in stored:
-        return False
-    return hmac.compare_digest(hash_pw(pw, stored.split("$")[0]), stored)
+    return "$" in stored and hmac.compare_digest(hash_pw(pw, stored.split("$")[0]), stored)
 
 
 @app.on_event("startup")
 def fijar_hashes():
-    """Los usuarios de farmaciadb.sql traen 'REEMPLAZAR_POR_HASH': les asigna la contraseña de desarrollo."""
-    try:
-        with connect() as c:
-            for u in c.execute("SELECT id_usuario FROM usuarios WHERE password_hash='REEMPLAZAR_POR_HASH'").fetchall():
-                c.execute("UPDATE usuarios SET password_hash=%s WHERE id_usuario=%s",
-                          (hash_pw(DEV_PASSWORD), u["id_usuario"]))
-    except Exception as e:
-        print("Aviso: no se pudieron fijar las contraseñas de desarrollo:", e)
+    # Solo sustituye los marcadores de las cuentas de demostración.
+    with connect() as db, db.transaction():
+        db.execute("SELECT clave_operacion, comprobante FROM pedidos LIMIT 0")
+        for u in db.execute("SELECT id_usuario FROM usuarios WHERE password_hash='REEMPLAZAR_POR_HASH'").fetchall():
+            db.execute("UPDATE usuarios SET password_hash=%s WHERE id_usuario=%s",
+                       (hash_pw(DEV_PASSWORD), u["id_usuario"]))
 
 
-def current_user(authorization: str = Header(default="")):
+def current_user(authorization: str = Header(default=""), db=Depends(get_db)):
     try:
-        return jwt.decode(authorization.replace("Bearer ", "", 1), SECRET, algorithms=["HS256"])
-    except jwt.PyJWTError:
+        if not authorization.startswith("Bearer "):
+            raise ValueError()
+        claims = jwt.decode(authorization[7:], SECRET, algorithms=["HS256"],
+                            options={"require": ["sub", "exp"]})
+        uid = int(claims["sub"])
+    except (jwt.PyJWTError, ValueError, TypeError):
         raise HTTPException(401, "Inicia sesión para continuar.")
-
-
-def admin_only(user=Depends(current_user)):
-    if user.get("rol") != "admin":
-        raise HTTPException(403, "Solo el administrador puede hacer esto.")
+    # Los permisos y el estado se consultan en la BD, no en un selector del navegador.
+    user = db.execute("SELECT id_usuario,correo,rol FROM usuarios WHERE id_usuario=%s AND activo", (uid,)).fetchone()
+    if not user:
+        raise HTTPException(401, "La cuenta no está activa.")
     return user
 
 
-# ---------- Esquemas ----------
-class Credenciales(BaseModel):
-    correo: str = Field(pattern=r"^\S+@\S+\.\S+$")
-    password: str = Field(min_length=4)
+def empleado_only(user=Depends(current_user)):
+    if user["rol"] != "empleado":
+        raise HTTPException(403, "Esta operación requiere una cuenta de empleado.")
+    return user
 
 
-class ClienteIn(BaseModel):
-    tipo_documento: str = Field(pattern="^(CC|CE|TI|PAS|NIT)$")
-    documento: str = Field(min_length=1)
-    nombre: str = Field(min_length=1)
-    apellido: str = Field(min_length=1)
-    correo: str = Field(pattern=r"^\S+@\S+\.\S+$")
-    celular: str = Field(min_length=1)
+class Entrada(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
 
-class ItemIn(BaseModel):
-    id_medicamento: int
-    cantidad: int = Field(gt=0)
-    numero_formula: Optional[str] = None
+class Credenciales(Entrada):
+    correo: str = Field(pattern=r"^\S+@\S+\.\S+$", max_length=100)
+    password: str = Field(min_length=4, max_length=128)
 
 
-class PedidoIn(BaseModel):
-    cliente: ClienteIn
-    direccion: str = Field(min_length=1)
-    metodo_pago: str
-    items: List[ItemIn] = Field(min_length=1)
+class ClienteIn(Entrada):
+    tipo_documento: Literal["CC", "CE", "TI", "PAS", "NIT"]
+    documento: str = Field(min_length=1, max_length=20)
+    nombre: str = Field(min_length=1, max_length=100)
+    apellido: str = Field(min_length=1, max_length=100)
+    correo: str = Field(pattern=r"^\S+@\S+\.\S+$", max_length=100)
+    celular: str = Field(min_length=1, max_length=20)
 
 
-class MedIn(BaseModel):
-    nombre: str = Field(min_length=1)
-    mg: Optional[int] = Field(default=None, gt=0)
-    forma: Optional[str] = None
-    id_categoria: int
-    id_laboratorio: int
-    precio: float = Field(ge=0)
-    stock: int = Field(default=0, ge=0)
-    requiere_formula: bool = False
+class ItemIn(Entrada):
+    id_medicamento: int = Field(gt=0)
+    cantidad: int = Field(gt=0, le=1_000_000, strict=True)
+    numero_formula: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    medico: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    fecha_emision: Optional[date] = None
+    fecha_vence: Optional[date] = None
+    formula_verificada: bool = False
 
 
-class StockIn(BaseModel):
-    delta: int
-    motivo: Optional[str] = None
+class PedidoIn(Entrada):
+    clave_operacion: UUID
+    cliente: Optional[ClienteIn] = None
+    id_cliente: Optional[int] = Field(default=None, gt=0)
+    direccion: str = Field(default="Venta presencial", min_length=1, max_length=200)
+    metodo_pago: Literal["Efectivo", "Datafono", "Nequi/PSE"]
+    items: List[ItemIn] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def sin_repetidos(self):
+        ids = [it.id_medicamento for it in self.items]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Cada medicamento debe aparecer una sola vez.")
+        return self
 
 
-# ---------- Autenticación ----------
-def token_for(u) -> dict:
+def token_for(u):
     exp = datetime.now(timezone.utc) + timedelta(hours=8)
-    tok = jwt.encode({"sub": str(u["id_usuario"]), "rol": u["rol"], "exp": exp}, SECRET, "HS256")
+    tok = jwt.encode({"sub": str(u["id_usuario"]), "exp": exp}, SECRET, "HS256")
     return {"token": tok, "correo": u["correo"], "rol": u["rol"]}
 
 
 @app.post("/api/auth/register", status_code=201)
 def register(c: Credenciales, db=Depends(get_db)):
     try:
-        u = db.execute("INSERT INTO usuarios (correo, password_hash, rol) VALUES (%s,%s,'cliente') RETURNING *",
-                       (c.correo.lower(), hash_pw(c.password))).fetchone()
+        with db.transaction():
+            u = db.execute("INSERT INTO usuarios (correo,password_hash,rol) VALUES (%s,%s,'cliente') RETURNING *",
+                           (c.correo.lower(), hash_pw(c.password))).fetchone()
     except psycopg.errors.UniqueViolation:
         raise HTTPException(409, "Ese correo ya está registrado.")
     return token_for(u)
@@ -133,20 +144,21 @@ def login(c: Credenciales, db=Depends(get_db)):
     return token_for(u)
 
 
-# ---------- Catálogo e inventario ----------
+@app.get("/api/salud")
+def salud(db=Depends(get_db)):
+    return db.execute("SELECT current_database() AS base_datos,current_schema() AS esquema, "
+                      "(SELECT count(*) FROM medicamentos) AS medicamentos").fetchone()
+
+
 CATALOGO = """
-SELECT m.id_medicamento,
-       m.nombre || COALESCE(' ' || m.mg || 'mg', '') AS nombre,
-       m.nombre AS nombre_base, m.mg, m.forma AS presentacion, m.precio, m.requiere_formula,
-       m.stock AS stock_fisico, v.disponible AS stock,
-       c.nombre AS categoria, l.nombre AS laboratorio, m.id_categoria, m.id_laboratorio,
-       CASE WHEN m.requiere_formula THEN 'Requiere Receta' WHEN v.disponible <= 5 THEN 'Bajo Stock' END AS etiqueta
-FROM medicamentos m
-JOIN categorias c ON c.id_categoria = m.id_categoria
-JOIN laboratorios l ON l.id_laboratorio = m.id_laboratorio
-JOIN v_stock_disponible v ON v.id_medicamento = m.id_medicamento
-WHERE m.activo AND m.nombre ILIKE %s
-ORDER BY m.nombre
+SELECT m.id_medicamento,m.nombre || COALESCE(' ' || m.mg || 'mg', '') AS nombre,
+       m.forma AS presentacion,m.precio,m.requiere_formula,m.stock AS stock_fisico,
+       v.disponible AS stock,c.nombre AS categoria,l.nombre AS laboratorio,
+       CASE WHEN m.requiere_formula THEN 'Requiere Receta'
+            WHEN v.disponible <= 5 THEN 'Bajo Stock' END AS etiqueta
+FROM medicamentos m JOIN categorias c USING (id_categoria)
+JOIN laboratorios l USING (id_laboratorio) JOIN v_stock_disponible v USING (id_medicamento)
+WHERE m.activo AND m.nombre ILIKE %s ORDER BY m.nombre
 """
 
 
@@ -155,101 +167,128 @@ def medicamentos(q: str = "", db=Depends(get_db)):
     return db.execute(CATALOGO, (f"%{q}%",)).fetchall()
 
 
-@app.get("/api/catalogos")
-def catalogos(db=Depends(get_db)):
-    return {"categorias": db.execute("SELECT * FROM categorias ORDER BY nombre").fetchall(),
-            "laboratorios": db.execute("SELECT * FROM laboratorios ORDER BY nombre").fetchall()}
+@app.get("/api/clientes/yo")
+def mi_cliente(user=Depends(current_user), db=Depends(get_db)):
+    if user["rol"] != "cliente":
+        raise HTTPException(403, "Solo para cuentas de cliente.")
+    return db.execute("SELECT * FROM clientes WHERE id_usuario=%s", (user["id_usuario"],)).fetchone()
 
 
-@app.post("/api/medicamentos", status_code=201)
-def crear_medicamento(m: MedIn, user=Depends(admin_only), db=Depends(get_db)):
+@app.get("/api/clientes")
+def clientes(documento: str, tipo_documento: str = "CC", user=Depends(empleado_only), db=Depends(get_db)):
+    return db.execute("SELECT * FROM clientes WHERE tipo_documento=%s AND documento=%s",
+                      (tipo_documento, documento.strip())).fetchall()
+
+
+@app.post("/api/clientes", status_code=201)
+def crear_cliente(c: ClienteIn, user=Depends(empleado_only), db=Depends(get_db)):
     try:
         with db.transaction():
-            r = db.execute(
-                "INSERT INTO medicamentos (id_laboratorio,id_categoria,nombre,mg,forma,requiere_formula,stock,precio) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id_medicamento",
-                (m.id_laboratorio, m.id_categoria, m.nombre, m.mg, m.forma, m.requiere_formula, m.stock, m.precio)).fetchone()
-            if m.stock > 0:
-                db.execute("INSERT INTO movimientos_inventario (id_medicamento,id_usuario,tipo,cantidad,motivo) "
-                           "VALUES (%s,%s,'entrada',%s,'Alta de medicamento')", (r["id_medicamento"], int(user["sub"]), m.stock))
-    except psycopg.errors.ForeignKeyViolation:
-        raise HTTPException(422, "Categoría o laboratorio inválido.")
-    return r
+            return db.execute("INSERT INTO clientes (tipo_documento,documento,nombre,apellido,correo,celular) "
+                              "VALUES (%s,%s,%s,%s,%s,%s) RETURNING *",
+                              (c.tipo_documento, c.documento, c.nombre, c.apellido, c.correo, c.celular)).fetchone()
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(409, "El documento ya está registrado. Busca y selecciona ese cliente.")
 
 
-@app.patch("/api/medicamentos/{id_medicamento}/stock")
-def ajustar_stock(id_medicamento: int, s: StockIn, user=Depends(admin_only), db=Depends(get_db)):
-    if s.delta == 0:
-        raise HTTPException(422, "El ajuste no puede ser 0.")
-    try:
-        with db.transaction():
-            r = db.execute("UPDATE medicamentos SET stock = stock + %s WHERE id_medicamento=%s AND activo RETURNING stock",
-                           (s.delta, id_medicamento)).fetchone()
-            if not r:
-                raise HTTPException(404, "Medicamento no encontrado.")
-            db.execute("INSERT INTO movimientos_inventario (id_medicamento,id_usuario,tipo,cantidad,motivo) VALUES (%s,%s,%s,%s,%s)",
-                       (id_medicamento, int(user["sub"]), "entrada" if s.delta > 0 else "salida", abs(s.delta), s.motivo))
-    except psycopg.errors.CheckViolation:
-        raise HTTPException(409, "El stock no puede quedar negativo.")
-    return r
+@app.get("/api/pedidos")
+def pedidos(user=Depends(current_user), db=Depends(get_db)):
+    return db.execute("SELECT p.id_pedido,p.fecha_pedido,p.estado,p.total,p.id_cliente,p.id_empleado, "
+                      "COALESCE(p.comprobante->'cliente'->>'nombre',c.nombre || ' ' || c.apellido) AS cliente, "
+                      "COALESCE(p.comprobante->>'empleado',u.correo) AS empleado "
+                      "FROM pedidos p JOIN clientes c USING (id_cliente) "
+                      "LEFT JOIN usuarios u ON u.id_usuario=p.id_empleado "
+                      "WHERE (%s IN ('empleado','admin') OR c.id_usuario=%s) ORDER BY p.id_pedido DESC",
+                      (user["rol"], user["id_usuario"])).fetchall()
 
 
-@app.delete("/api/medicamentos/{id_medicamento}")
-def quitar_medicamento(id_medicamento: int, user=Depends(admin_only), db=Depends(get_db)):
-    # Baja lógica: conserva el historial de pedidos que ya lo incluyen
-    r = db.execute("UPDATE medicamentos SET activo=FALSE WHERE id_medicamento=%s AND activo RETURNING id_medicamento",
-                   (id_medicamento,)).fetchone()
-    if not r:
-        raise HTTPException(404, "Medicamento no encontrado.")
-    return {"ok": True}
+@app.get("/api/pedidos/{id_pedido}/comprobante")
+def comprobante(id_pedido: int, user=Depends(current_user), db=Depends(get_db)):
+    row = db.execute("SELECT p.comprobante FROM pedidos p JOIN clientes c USING (id_cliente) "
+                     "WHERE p.id_pedido=%s AND (%s IN ('empleado','admin') OR c.id_usuario=%s)",
+                     (id_pedido, user["rol"], user["id_usuario"])).fetchone()
+    if not row:
+        raise HTTPException(404, "Comprobante no encontrado.")
+    return row["comprobante"]
 
 
-# ---------- Pedido: usa reservar_stock() y confirmar_pedido() de la base de datos ----------
+def cliente_de_compra(p, user, db):
+    if user["rol"] == "empleado":
+        if not p.id_cliente or p.cliente is not None:
+            raise HTTPException(422, "Selecciona un cliente existente para la venta.")
+        cli = db.execute("SELECT * FROM clientes WHERE id_cliente=%s FOR UPDATE", (p.id_cliente,)).fetchone()
+        if not cli:
+            raise HTTPException(404, "Cliente no encontrado.")
+        return cli
+    if user["rol"] != "cliente":
+        raise HTTPException(403, "El administrador solo consulta ventas e inventario.")
+    if p.id_cliente is not None or p.cliente is None:
+        raise HTTPException(422, "Completa tus datos de cliente.")
+    c = p.cliente
+    # Serializa compras de la misma cuenta antes de buscar o crear su perfil.
+    db.execute("SELECT id_usuario FROM usuarios WHERE id_usuario=%s FOR UPDATE", (user["id_usuario"],))
+    cli = db.execute("SELECT * FROM clientes WHERE id_usuario=%s FOR UPDATE", (user["id_usuario"],)).fetchone()
+    if cli:
+        if (cli["tipo_documento"], cli["documento"]) != (c.tipo_documento, c.documento):
+            raise HTTPException(409, "El documento no coincide con tu perfil registrado.")
+        return db.execute("UPDATE clientes SET nombre=%s,apellido=%s,correo=%s,celular=%s "
+                          "WHERE id_cliente=%s RETURNING *", (c.nombre, c.apellido, c.correo, c.celular, cli["id_cliente"])).fetchone()
+    if db.execute("SELECT 1 FROM clientes WHERE tipo_documento=%s AND documento=%s",
+                  (c.tipo_documento, c.documento)).fetchone():
+        raise HTTPException(409, "Ese documento ya está registrado. Solicita atención del empleado.")
+    return db.execute("INSERT INTO clientes (id_usuario,tipo_documento,documento,nombre,apellido,correo,celular) "
+                      "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                      (user["id_usuario"], c.tipo_documento, c.documento, c.nombre, c.apellido, c.correo, c.celular)).fetchone()
+
+
 @app.post("/api/pedidos", status_code=201)
 def crear_pedido(p: PedidoIn, user=Depends(current_user), db=Depends(get_db)):
-    ids = sorted({i.id_medicamento for i in p.items})
+    huella = hashlib.sha256(json.dumps(p.model_dump(mode="json"), sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     try:
-        with db.transaction():  # cualquier excepción dentro hace rollback de todo
-            db.execute("SELECT liberar_reservas_vencidas()")
+        with db.transaction():
+            # Un reintento con la misma clave espera y devuelve la venta original.
+            db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (str(p.clave_operacion),))
+            anterior = db.execute("SELECT id_usuario_operacion,solicitud_hash,comprobante FROM pedidos "
+                                  "WHERE clave_operacion=%s", (p.clave_operacion,)).fetchone()
+            if anterior:
+                if anterior["id_usuario_operacion"] != user["id_usuario"] or anterior["solicitud_hash"] != huella:
+                    raise HTTPException(409, "La clave de operación ya se usó con otra solicitud.")
+                return anterior["comprobante"]
+            cli = cliente_de_compra(p, user, db)
+            cid = cli["id_cliente"]
+            ids = sorted(it.id_medicamento for it in p.items)
+            # Orden fijo de bloqueo; ni precios ni totales se aceptan del navegador.
             meds = {m["id_medicamento"]: m for m in db.execute(
-                "SELECT id_medicamento, nombre, requiere_formula FROM medicamentos WHERE id_medicamento = ANY(%s) AND activo",
-                (ids,)).fetchall()}
+                "SELECT * FROM medicamentos WHERE id_medicamento=ANY(%s) AND activo "
+                "ORDER BY id_medicamento FOR UPDATE", (ids,)).fetchall()}
+            formulas = []
+            hoy = db.execute("SELECT CURRENT_DATE AS hoy").fetchone()["hoy"]
             for it in p.items:
                 m = meds.get(it.id_medicamento)
                 if not m:
-                    raise HTTPException(404, "Un medicamento del carrito ya no está disponible.")
-                if m["requiere_formula"] and not (it.numero_formula or "").strip():
-                    raise HTTPException(422, f"{m['nombre']} requiere número de fórmula.")
-
-            c = p.cliente
-            cli = db.execute("SELECT id_cliente FROM clientes WHERE id_usuario=%s", (int(user["sub"]),)).fetchone()
-            if cli:
-                db.execute("UPDATE clientes SET nombre=%s, apellido=%s, correo=%s, celular=%s WHERE id_cliente=%s",
-                           (c.nombre, c.apellido, c.correo, c.celular, cli["id_cliente"]))
-            else:
-                cli = db.execute(
-                    "INSERT INTO clientes (id_usuario,nombre,apellido,tipo_documento,documento,correo,celular) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (tipo_documento, documento) DO UPDATE SET "
-                    "nombre=EXCLUDED.nombre, apellido=EXCLUDED.apellido, correo=EXCLUDED.correo, celular=EXCLUDED.celular, "
-                    "id_usuario=COALESCE(clientes.id_usuario, EXCLUDED.id_usuario) RETURNING id_cliente",
-                    (int(user["sub"]), c.nombre, c.apellido, c.tipo_documento, c.documento, c.correo, c.celular)).fetchone()
-            cid = cli["id_cliente"]
-
-            # Limpia reservas activas previas del cliente y reserva lo del carrito (orden fijo evita deadlocks)
+                    raise HTTPException(404, "Un medicamento ya no está disponible.")
+                if m["requiere_formula"]:
+                    if user["rol"] != "empleado":
+                        raise HTTPException(422, f"{m['nombre']} requiere venta asistida y verificación del empleado.")
+                    if not (it.formula_verificada and it.numero_formula and it.medico and
+                            it.fecha_emision and it.fecha_vence and it.fecha_emision <= hoy <= it.fecha_vence):
+                        raise HTTPException(422, "Verifica la fórmula: número, médico y fechas vigentes son obligatorios.")
+                    formulas.append(it.model_dump(mode="json"))
+            # El bloqueo del cliente evita mezclar sus reservas en compras simultáneas.
             db.execute("UPDATE reservas SET estado='no_activa' WHERE id_cliente=%s AND estado='activa'", (cid,))
-            for it in sorted(p.items, key=lambda i: i.id_medicamento):
+            for it in sorted(p.items, key=lambda x: x.id_medicamento):
                 db.execute("SELECT reservar_stock(%s,%s,%s)", (cid, it.id_medicamento, it.cantidad))
-            pid = db.execute("SELECT confirmar_pedido(%s, NULL, %s, %s) AS id",
-                             (cid, p.direccion, p.metodo_pago)).fetchone()["id"]
-
-            for it in p.items:  # las fórmulas quedan pendientes de verificar por un empleado (valida = false)
-                if meds[it.id_medicamento]["requiere_formula"]:
-                    db.execute("INSERT INTO formulas (id_pedido,id_medicamento,medico,numero_formula,fecha_emision,fecha_vence,valida) "
-                               "VALUES (%s,%s,'Por verificar',%s,CURRENT_DATE,CURRENT_DATE + 30,FALSE)",
-                               (pid, it.id_medicamento, it.numero_formula.strip()))
-            total = db.execute("SELECT total FROM pedidos WHERE id_pedido=%s", (pid,)).fetchone()["total"]
-            items = db.execute("SELECT m.nombre, d.cantidad, d.precio_unitario AS precio FROM detalles_pedido d "
-                               "JOIN medicamentos m ON m.id_medicamento=d.id_medicamento WHERE d.id_pedido=%s", (pid,)).fetchall()
-    except psycopg.errors.RaiseException as e:  # mensajes de reservar_stock / confirmar_pedido
-        raise HTTPException(409, e.diag.message_primary or "No se pudo completar el pedido.")
-    return {"id_pedido": pid, "total": total, "items": items}
+            empleado = user["id_usuario"] if user["rol"] == "empleado" else None
+            pid = db.execute("SELECT confirmar_pedido(%s,%s,%s,%s,%s) AS id",
+                             (cid, empleado, p.direccion, p.metodo_pago, Jsonb(formulas))).fetchone()["id"]
+            result = db.execute("UPDATE pedidos SET clave_operacion=%s,id_usuario_operacion=%s,solicitud_hash=%s, "
+                                "comprobante=snapshot_pedido(id_pedido) WHERE id_pedido=%s RETURNING comprobante",
+                                (p.clave_operacion, user["id_usuario"], huella, pid)).fetchone()["comprobante"]
+        # Venta, descuento y comprobante ya fueron confirmados juntos.
+        return result
+    except psycopg.errors.RaiseException as e:
+        raise HTTPException(409, e.diag.message_primary or "No se pudo completar la venta.")
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(409, "El cliente o la operación ya están registrados. Actualiza los datos.")
+    except psycopg.errors.CheckViolation:
+        raise HTTPException(409, "No se pudo completar la venta: revisa las cantidades disponibles.")

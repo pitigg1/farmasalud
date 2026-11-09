@@ -1,0 +1,93 @@
+# Verificación de FarmaSalud — 20 de octubre de 2026
+
+## Resultado
+
+Se verificó el recorrido React → proxy de Vite → FastAPI → PostgreSQL → comprobante.
+Los archivos actualizados también se copiaron a la carpeta original del proyecto.
+La migración se aplicó al volumen existente, después de respaldarlo.
+
+## Datos de la base principal conservados
+
+| Dato | Antes | Después |
+|---|---:|---:|
+| Medicamentos | 5 | 5 |
+| Clientes | 1 | 1 |
+| Pedidos | 0 | 0 |
+
+Las compras de prueba se ejecutaron exclusivamente en `farmacia_test`.
+Se conservó el volumen `farmasalud-main_pgdata`; no se eliminó ni se reinició su stock.
+La API convierte los marcadores de contraseña de las cuentas de demostración en hashes,
+tal como hacía el prototipo original. El respaldo previo conserva el estado anterior.
+
+## Evidencia automatizada
+
+```text
+15 passed, 15 warnings in 247.28s
+```
+
+Las advertencias proceden del adaptador TestClient/httpx de las versiones fijadas;
+no son fallos de las ventas. Las pruebas comprobaron:
+
+- Cliente presencial sin crear cuenta de acceso y venta atribuida al empleado.
+- Ventas a dos clientes diferentes sin asociarlos con la cuenta del empleado.
+- Compra propia del cliente y permisos por rol.
+- Rechazo de apropiación de un documento ya registrado.
+- Rollback de todos los productos ante stock insuficiente.
+- Fórmula obligatoria y verificada para la venta asistida.
+- Rechazo de verificación de fórmula por el cliente.
+- Reintento de una operación sin duplicar descuento; cambio de contenido rechazado.
+- Última unidad con solicitudes simultáneas de clientes diferentes.
+- Última unidad con solicitudes simultáneas del mismo cliente.
+- Reenvíos simultáneos de la misma operación.
+- Protección de comprobantes ajenos e independencia del comprobante ante cambios posteriores.
+- Retiro de endpoints de alta, baja y ajuste de medicamentos.
+- Rechazo de usuarios desactivados.
+- Migración repetible que conserva stock y comprobante.
+
+## Evidencia en navegador y SQL
+
+En `http://localhost:5174`, conectado únicamente a `farmacia_test`:
+
+1. Se inició sesión como empleado y se buscó un documento inexistente.
+2. Se registró el cliente ficticio Demo Navegador, documento `900000099`.
+3. Se vendieron dos unidades de Loratadina desde la interfaz.
+4. La web consultó `/api/pedidos/2/comprobante` y mostró `FS-2`, empleado y total.
+5. PostgreSQL confirmó:
+
+```text
+id_pedido=2, id_cliente=2, id_empleado=2, total=9600.00, cantidad=2, stock=118
+```
+
+Después se recargó la página, se inició sesión como cliente y se compró una Aspirina:
+
+```text
+id_pedido=3, id_cliente=1, id_empleado=NULL, total=5200.00, cantidad=1, stock=149
+```
+
+Los logs confirmaron POST de ventas con estado 201 y GET de comprobantes con estado 200.
+La captura `comprobante-prueba.png` de la entrega muestra el comprobante del empleado.
+Los servidores temporales 5174/8001 se cerraron después de las comprobaciones.
+
+## Compilación y ejecución final
+
+- `npm ci` completado y `npm run build` correcto: 33 módulos transformados.
+- Imagen de API construida correctamente con `python:3.12-slim`.
+- API definitiva iniciada mediante Docker Compose y consultada por HTTP.
+- `/api/salud`: `base_datos=farmacia`, `esquema=farmacia`, `medicamentos=5`.
+- Proxy `/api/medicamentos` del frontend: 5 medicamentos.
+- PostgreSQL publicado únicamente en `127.0.0.1:5433`.
+- API publicada únicamente en `127.0.0.1:8000`.
+- Frontend iniciado desde la carpeta original en `127.0.0.1:5173`.
+
+## Alcance y pendientes
+
+El comprobante es académico e imprimible; no es facturación electrónica ni un cobro.
+La revisión de fórmula es una declaración del empleado, validada por rol y fechas;
+no existe integración con un verificador médico externo.
+pgAdmin no se instaló ni configuró en el equipo: los pasos y credenciales de conexión
+están en README y las consultas preparadas en `backend/demo_consultas.sql`.
+La impresión tiene estilos específicos; no se realizó una impresión física.
+
+Se mantuvieron las versiones principales del prototipo. `npm ci` reportó dos avisos
+de seguridad en dependencias (uno moderado y uno alto); su actualización requiere
+una revisión separada antes de publicar el proyecto fuera de este entorno local.

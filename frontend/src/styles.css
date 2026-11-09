@@ -89,3 +89,18 @@ table{width:100%;border-collapse:collapse;font-size:.88rem}th{text-align:left;fo
 .fgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;align-items:end;margin-top:12px;padding:16px;background:#F8FAFC;border-radius:14px}
 .chk{display:flex;align-items:center;gap:8px;margin:0 0 10px}.chk input{width:auto}
 .acts{white-space:nowrap}.acts button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px 10px;margin-right:6px;font-weight:600}.acts .del{color:#DC2626;border-color:#FCA5A5}
+
+/* Venta asistida: se reutilizan paneles y colores del diseño original. */
+fieldset{border:0;padding:0;margin:0;min-width:0}
+.orders{margin-top:20px}.table-scroll{overflow-x:auto}
+.section-head{display:flex;justify-content:space-between;align-items:center;gap:16px}
+.quantity-input{min-width:76px;width:90px}.pos{grid-template-columns:1fr 1.5fr}
+.search-client{align-items:end}.search-client button{grid-column:1/-1}
+.receipt{width:min(800px,100%)}.receipt .sum p{margin:6px 0}
+@media(max-width:900px){.pos{grid-template-columns:1fr}}
+@media print{
+  body>*{display:none!important}#root{display:block!important}
+  #root>*{display:none!important}#root>.receipt-overlay{display:block!important;position:static;background:white;padding:0;backdrop-filter:none}
+  .receipt{width:100%;max-height:none;overflow:visible;border-radius:0;padding:0!important}
+  .no-print{display:none!important}.receipt .table-scroll{overflow:visible}
+}

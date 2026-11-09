@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 .venv/
+.venv312/
+source/
+.pytest_cache/
 venv/
 
 # Node / Vite
@@ -17,3 +20,4 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
+backups/
