@@ -74,7 +74,7 @@ export default function App() {
               {auth && <button className="nav" onClick={() => setHistory(true)}>📄 Mis compras y comprobantes</button>}
               <button className={'nav' + (onlyFav ? ' on' : '')} onClick={() => { setOnlyFav(true); setHistory(false) }}>♡ Mis Favoritos{favs.length > 0 && <em>{favs.length}</em>}</button>
 
-              <div className="promo"><span>FARMASALUD</span><b>Existencias consultadas en PostgreSQL</b><p>Las fórmulas médicas se verifican en atención presencial.</p></div>
+              <div className="promo"><span>VENTA ASISTIDA</span><b>¿Tu medicamento requiere fórmula médica?</b><p>Acércate a la droguería con tu fórmula: nuestro boticario la revisa y te atiende.</p></div>
             </aside>
             <main>
               {history && auth ? <Orders auth={auth} onReceipt={id => setOrder(id)} /> : <>
