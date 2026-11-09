@@ -89,7 +89,7 @@ function MedForm({ auth, value, labs, cats, close, onSaved, reloadRefs }) {
         <div><label htmlFor="m-precio">Precio (COP)</label><input id="m-precio" required type="number" min="0" step="0.01" value={f.precio} onChange={e => set('precio', e.target.value)} /></div>
         {nuevo && <div><label htmlFor="m-stock">Stock inicial</label><input id="m-stock" required type="number" min="0" step="1" value={f.stock_inicial} onChange={e => set('stock_inicial', e.target.value)} /></div>}
       </div>
-      <label className="chk"><input type="checkbox" checked={f.requiere_formula} onChange={e => set('requiere_formula', e.target.checked)} />Requiere fórmula médica (venta asistida)</label>
+      <label className="chk" style={{ marginTop: 14 }}><input type="checkbox" checked={f.requiere_formula} onChange={e => set('requiere_formula', e.target.checked)} />Requiere fórmula médica (venta asistida)</label>
       {!nuevo && <p className="mute">El stock se modifica con "Ajustar stock", para que quede registrado el movimiento.</p>}
       <p className="err" role="alert">{error}</p>
       <button className="yel full">{busy ? 'Guardando…' : 'Guardar'}</button>

@@ -23,6 +23,7 @@ frontend/src/
   App.jsx                   Catálogo y acceso según rol
   Sales.jsx                 Cliente, venta asistida, historial y comprobante
   Inventario.jsx            Gestión de inventario del administrador
+  Informe.jsx               Informe de inventario y ventas (imprimible)
   api.js                    Solicitudes a FastAPI
   styles.css                Diseño original y estilos de impresión
 ```
@@ -118,7 +119,7 @@ puerto silenciosamente.
 |---|---|---|
 | cliente@mail.com | farmacia123 | Compra propia e historial |
 | empleado@farmacia.com | farmacia123 | Registro de clientes y venta presencial |
-| admin@farmacia.com | farmacia123 | Gestión de inventario y consulta de ventas |
+| admin@farmacia.com | farmacia123 | Gestión de inventario, ventas e informes |
 
 La API asigna esa contraseña únicamente a registros que todavía tengan
 `REEMPLAZAR_POR_HASH`; no reemplaza contraseñas ya establecidas.
@@ -204,7 +205,17 @@ médicos ni se conecta con un sistema externo.
    conserva los pedidos y comprobantes anteriores. **Reactivar** lo devuelve.
 6. En pgAdmin, revisa `medicamentos` y `movimientos_inventario`.
 
-### F. Rollback y concurrencia
+### F. Informe de inventario y ventas (administrador)
+
+1. Con la sesión de administrador, pulsa **Generar informe**.
+2. Elige el periodo (por defecto, los últimos 30 días) y el umbral de stock bajo.
+3. El informe muestra el total vendido, los pedidos, las unidades, el ticket promedio,
+   los más vendidos, las ventas por canal (en línea o presencial), por método de
+   pago y por día, y el inventario actual con su valor y alertas de stock bajo.
+4. Usa **Imprimir / Guardar PDF**. Todas las cifras salen de una sola consulta
+   consistente a PostgreSQL y solo cuentan pedidos confirmados o entregados.
+
+### G. Rollback y concurrencia
 
 No alteres el stock de la BD principal para preparar la demostración. Ejecuta las
 pruebas de la sección siguiente en `farmacia_test`. Muestra especialmente:
@@ -258,6 +269,7 @@ Para revisar el frontend: `cd frontend` y `npm.cmd run build`.
 | DELETE | /api/medicamentos/{id} | Administrador: retiro lógico |
 | POST | /api/medicamentos/{id}/reactivar | Administrador |
 | GET, POST | /api/laboratorios, /api/categorias | Administrador |
+| GET | /api/informes?desde=&hasta=&umbral= | Administrador: informe de inventario y ventas |
 
 `POST /api/pedidos` requiere `clave_operacion` (UUID), `metodo_pago` e `items`.
 El cliente envía sus datos en `cliente`; el empleado envía el `id_cliente`

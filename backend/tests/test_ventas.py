@@ -328,3 +328,50 @@ def test_migration_preserves_data_and_is_repeatable(client):
     assert scalar("SELECT count(*) FROM medicamentos") == 5
     assert scalar("SELECT stock FROM medicamentos WHERE id_medicamento=1") == 198
     assert scalar("SELECT comprobante FROM pedidos") == receipt
+
+
+def test_report_sales_and_inventory(client):
+    auth, admin = headers(client), headers(client, "admin@farmacia.com")
+    cli = headers(client, "cliente@mail.com")
+    empty = client.get("/api/informes", headers=admin).json()
+    assert empty["ventas"]["resumen"]["pedidos"] == 0 and empty["ventas"]["mas_vendidos"] == []
+    assert empty["inventario"]["productos"] == 5 and empty["inventario"]["unidades"] == 610
+    # Venta presencial: 2 Acetaminofén (3500) + compra en línea: 1 Aspirina (5200).
+    assert client.post("/api/pedidos", headers=auth, json=order(qty=2)).status_code == 201
+    online = {"clave_operacion": str(uuid4()), "metodo_pago": "Nequi/PSE", "direccion": "Calle 1",
+              "cliente": {"tipo_documento": "CC", "documento": "1098765432", "nombre": "Laura", "apellido": "Gómez",
+                          "correo": "cliente@mail.com", "celular": "3001234567"},
+              "items": [{"id_medicamento": 2, "cantidad": 1}]}
+    assert client.post("/api/pedidos", headers=cli, json=online).status_code == 201, "compra en línea"
+    r = client.get("/api/informes", headers=admin, params={"umbral": 100})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    res = data["ventas"]["resumen"]
+    assert (res["pedidos"], res["unidades"], res["clientes"]) == (2, 3, 1)
+    assert float(res["total_vendido"]) == 12200 and float(res["ticket_promedio"]) == 6100
+    canales = {c["canal"]: float(c["total"]) for c in data["ventas"]["por_canal"]}
+    assert canales == {"Presencial (empleado)": 7000, "En línea (cliente)": 5200}
+    assert {m["metodo_pago"] for m in data["ventas"]["por_metodo_pago"]} == {"Efectivo", "Nequi/PSE"}
+    top = data["ventas"]["mas_vendidos"][0]
+    assert (top["nombre"], top["unidades"], float(top["ingresos"])) == ("Acetaminofén 500mg", 2, 7000)
+    inv = data["inventario"]
+    assert inv["unidades"] == 607 and inv["bajo_stock"] == 2  # Amoxicilina (80) y Vitamina C (60)
+    assert sum(float(d["total"]) for d in data["ventas"]["por_dia"]) == 12200
+    # Un periodo sin ventas no cuenta los pedidos de hoy.
+    old = client.get("/api/informes", headers=admin, params={"desde": "2020-01-01", "hasta": "2020-01-31"}).json()
+    assert old["ventas"]["resumen"]["pedidos"] == 0 and old["inventario"]["unidades"] == 607
+    # Un medicamento retirado sale del inventario del informe, pero no de las ventas.
+    client.delete("/api/medicamentos/1", headers=admin)
+    after = client.get("/api/informes", headers=admin).json()
+    assert after["inventario"]["productos"] == 4 and after["ventas"]["resumen"]["unidades"] == 3
+
+
+def test_report_validation_and_permissions(client):
+    admin = headers(client, "admin@farmacia.com")
+    assert client.get("/api/informes", headers=headers(client)).status_code == 403
+    assert client.get("/api/informes", headers=headers(client, "cliente@mail.com")).status_code == 403
+    assert client.get("/api/informes").status_code == 401
+    bad = [{"desde": "2026-02-01", "hasta": "2026-01-01"}, {"desde": "2020-01-01", "hasta": "2026-01-01"},
+           {"umbral": -1}, {"desde": "no-es-fecha"}]
+    for params in bad:
+        assert client.get("/api/informes", headers=admin, params=params).status_code == 422, params

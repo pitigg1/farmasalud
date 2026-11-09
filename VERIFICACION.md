@@ -79,15 +79,16 @@ Los servidores temporales 5174/8001 se cerraron después de las comprobaciones.
 - API publicada únicamente en `127.0.0.1:8000`.
 - Frontend iniciado desde la carpeta original en `127.0.0.1:5173`.
 
-## Actualización — 9 de noviembre de 2026: gestión de inventario
+## Actualización — 9 de noviembre de 2026: gestión de inventario e informe
 
-Se implementó el caso de uso **Gestionar Inventario** del administrador: registrar,
+Se implementaron los casos de uso **Gestionar Inventario** y **Generar Informe de
+Inventario/Ventas** del administrador. Gestionar Inventario permite registrar,
 editar, ajustar stock con motivo, retirar y reactivar medicamentos, y crear
 laboratorios y categorías. La prueba que verificaba el retiro de esas rutas se
 sustituyó por pruebas de la nueva funcionalidad.
 
 ```text
-19 passed in 12.36s   (PostgreSQL 16.2, base farmacia_test)
+21 passed   (PostgreSQL 16.2, base farmacia_test)
 ```
 
 Nuevas comprobaciones:
@@ -98,6 +99,12 @@ Nuevas comprobaciones:
 - Ajustes registrados con usuario y motivo; rechazo de stock negativo o menor que lo reservado.
 - Medicamento retirado: fuera del catálogo y sin ventas nuevas, conservando comprobantes.
 - Ajuste y venta simultáneos sobre la última unidad: solo uno se aplica y el stock queda en cero.
+- Informe: totales, unidades, ticket promedio, canal, método de pago, más vendidos e inventario
+  coinciden con las ventas registradas; respeta el periodo, el umbral y los retiros.
+- Informe: solo para el administrador; rechaza periodos invertidos, mayores a un año o fechas inválidas.
+
+También se revisó en navegador (Microsoft Edge): alta, ajuste y movimientos de un medicamento,
+y generación e impresión a PDF del informe, sin errores de JavaScript.
 
 ## Alcance y pendientes
 

@@ -3,6 +3,7 @@ import { api } from './api'
 import './styles.css'
 import { Checkout, Seller, Orders, Receipt } from './Sales'
 import { Inventario } from './Inventario'
+import { Informe } from './Informe'
 
 const fmt = n => '$' + Number(n).toLocaleString('es-CO')
 const TODOS = 'Todos los productos'
@@ -27,6 +28,7 @@ export default function App() {
   const [modal, setModal] = useState(null) // login | checkout
   const [toast, setToast] = useState('')
   const [order, setOrder] = useState(null)
+  const [report, setReport] = useState(false)
 
   const say = t => { setToast(t); setTimeout(() => setToast(''), 2200) }
   const loadMeds = () => api('/medicamentos').then(setMeds).catch(() => say('No se pudo cargar el catálogo'))
@@ -58,7 +60,7 @@ export default function App() {
         {role === 'cliente' && <button className="bag" aria-label="Carrito" onClick={() => setDrawer(true)}>🛍<b>{count}</b></button>}
         {auth ? (
           <div className="user"><div className="av">{name.slice(0, 2).toUpperCase()}</div><div><b>{name}</b><span className="chip">{chipLabel}</span></div>
-            <button className="out" aria-label="Cerrar sesión" onClick={() => { setAuth(null); setCart({}); setOrder(null); setModal(null); setHistory(false); setDrawer(false); say('Sesión cerrada') }}>⎋</button></div>
+            <button className="out" aria-label="Cerrar sesión" onClick={() => { setAuth(null); setCart({}); setOrder(null); setModal(null); setHistory(false); setReport(false); setDrawer(false); say('Sesión cerrada') }}>⎋</button></div>
         ) : <button className="yel" onClick={() => setModal('login')}>Iniciar sesión</button>}
       </header>
 
@@ -102,7 +104,7 @@ export default function App() {
         )}
         {role === 'empleado' && <Seller auth={auth} meds={meds} reload={loadMeds} onReceipt={setOrder} />}
         {role === 'admin' && <>
-          <section className="banner"><div><h1>Administración FarmaSalud</h1><p>Gestión de inventario y consulta de ventas.</p></div></section>
+          <section className="banner"><div><h1>Administración FarmaSalud</h1><p>Gestión de inventario, ventas e informes.</p></div><button className="yel" onClick={() => setReport(true)}>Generar informe</button></section>
           <Inventario auth={auth} onChange={loadMeds} />
           <Orders auth={auth} onReceipt={setOrder} />
         </>}
@@ -135,6 +137,7 @@ export default function App() {
       {modal === 'checkout' && <Checkout cart={cart} ids={ids} med={med} auth={auth} reload={loadMeds} close={() => setModal(null)}
         onDone={o => { setOrder(o.id_pedido); setCart({}); setModal(null); loadMeds() }} />}
       {order !== null && <Receipt id={order} auth={auth} close={() => setOrder(null)} />}
+      {report && role === 'admin' && <Informe auth={auth} close={() => setReport(false)} />}
       {toast && <div className="toast" role="status">{toast}</div>}
     </>
   )

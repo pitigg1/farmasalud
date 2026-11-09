@@ -12,7 +12,7 @@ import jwt
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -334,6 +334,66 @@ def crear_categoria(c: CategoriaIn, user=Depends(admin_only), db=Depends(get_db)
         return db.execute("INSERT INTO categorias (nombre) VALUES (%s) RETURNING *", (c.nombre,)).fetchone()
     except psycopg.errors.UniqueViolation:
         raise HTTPException(409, "Esa categoría ya existe.")
+
+
+# ---------- Generar informe de inventario y ventas (caso de uso del Administrador) ----------
+VENDIDOS = "p.estado IN ('confirmado','entregado') AND p.fecha_pedido BETWEEN %(desde)s AND %(hasta)s"
+
+
+@app.get("/api/informes")
+def informe(desde: Optional[date] = None, hasta: Optional[date] = None,
+            umbral: int = Query(default=10, ge=0, le=100_000), user=Depends(admin_only), db=Depends(get_db)):
+    hoy = db.execute("SELECT CURRENT_DATE AS hoy").fetchone()["hoy"]
+    hasta = hasta or hoy
+    desde = desde or hasta - timedelta(days=29)
+    if desde > hasta:
+        raise HTTPException(422, "La fecha inicial no puede ser posterior a la final.")
+    if (hasta - desde).days > 366:
+        raise HTTPException(422, "El periodo del informe no puede superar un año.")
+    q = {"desde": desde, "hasta": hasta, "umbral": umbral}
+    with db.transaction():
+        # Una sola instantánea de la BD para que todas las cifras del informe cuadren entre sí.
+        db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        resumen = db.execute(
+            "SELECT COUNT(*) AS pedidos, COALESCE(SUM(p.total),0) AS total_vendido, "
+            "COALESCE(ROUND(AVG(p.total),2),0) AS ticket_promedio, "
+            "COALESCE((SELECT SUM(d.cantidad) FROM detalles_pedido d JOIN pedidos p USING (id_pedido) WHERE " + VENDIDOS + "),0) AS unidades, "
+            "COUNT(DISTINCT p.id_cliente) AS clientes "
+            "FROM pedidos p WHERE " + VENDIDOS, q).fetchone()
+        por_dia = db.execute(
+            "SELECT p.fecha_pedido AS fecha, COUNT(*) AS pedidos, SUM(p.total) AS total "
+            "FROM pedidos p WHERE " + VENDIDOS + " GROUP BY p.fecha_pedido ORDER BY p.fecha_pedido", q).fetchall()
+        por_canal = db.execute(
+            "SELECT CASE WHEN p.id_empleado IS NULL THEN 'En línea (cliente)' ELSE 'Presencial (empleado)' END AS canal, "
+            "COUNT(*) AS pedidos, SUM(p.total) AS total FROM pedidos p WHERE " + VENDIDOS +
+            " GROUP BY 1 ORDER BY total DESC", q).fetchall()
+        por_metodo = db.execute(
+            "SELECT COALESCE(p.metodo_pago,'Sin registrar') AS metodo_pago, COUNT(*) AS pedidos, SUM(p.total) AS total "
+            "FROM pedidos p WHERE " + VENDIDOS + " GROUP BY 1 ORDER BY total DESC", q).fetchall()
+        mas_vendidos = db.execute(
+            "SELECT m.id_medicamento, m.nombre || COALESCE(' ' || m.mg || 'mg','') AS nombre, "
+            "SUM(d.cantidad) AS unidades, SUM(d.cantidad*d.precio_unitario) AS ingresos "
+            "FROM detalles_pedido d JOIN pedidos p USING (id_pedido) JOIN medicamentos m USING (id_medicamento) "
+            "WHERE " + VENDIDOS + " GROUP BY m.id_medicamento ORDER BY unidades DESC, ingresos DESC LIMIT 10", q).fetchall()
+        inventario = db.execute(
+            "SELECT m.id_medicamento, m.nombre || COALESCE(' ' || m.mg || 'mg','') AS nombre, c.nombre AS categoria, "
+            "m.precio, v.stock_fisico, v.reservado, v.disponible, m.stock*m.precio AS valor, "
+            "v.disponible <= %(umbral)s AS bajo_stock "
+            "FROM medicamentos m JOIN categorias c USING (id_categoria) JOIN v_stock_disponible v USING (id_medicamento) "
+            "WHERE m.activo ORDER BY v.disponible, m.nombre", q).fetchall()
+    return {
+        "periodo": {"desde": desde, "hasta": hasta}, "umbral_bajo_stock": umbral,
+        "generado_en": datetime.now(timezone.utc), "generado_por": user["correo"],
+        "ventas": {"resumen": resumen, "por_dia": por_dia, "por_canal": por_canal,
+                   "por_metodo_pago": por_metodo, "mas_vendidos": mas_vendidos},
+        "inventario": {
+            "productos": len(inventario),
+            "unidades": sum(i["stock_fisico"] for i in inventario),
+            "valor_total": sum((i["valor"] for i in inventario), Decimal(0)),
+            "bajo_stock": sum(1 for i in inventario if i["bajo_stock"]),
+            "detalle": inventario,
+        },
+    }
 
 
 @app.get("/api/clientes/yo")
