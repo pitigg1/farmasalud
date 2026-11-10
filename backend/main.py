@@ -560,6 +560,54 @@ def pedidos(user=Depends(current_user), db=Depends(get_db)):
                       (user["rol"], user["id_usuario"])).fetchall()
 
 
+# ---------- Actualizar estado de pedido / Cancelar pedido ----------
+class CambioEstado(Entrada):
+    estado: Literal["entregado", "cancelado"]
+    motivo: Optional[str] = Field(default=None, min_length=3, max_length=150)
+
+    @model_validator(mode="after")
+    def motivo_al_cancelar(self):
+        if self.estado == "cancelado" and not self.motivo:
+            raise ValueError("Indica el motivo de la cancelación.")
+        return self
+
+
+@app.patch("/api/pedidos/{id_pedido}/estado")
+def cambiar_estado_pedido(id_pedido: int, c: CambioEstado, user=Depends(current_user), db=Depends(get_db)):
+    with db.transaction():
+        p = db.execute("SELECT p.id_pedido,p.estado,p.id_empleado,c.id_usuario AS dueno FROM pedidos p "
+                       "JOIN clientes c USING (id_cliente) WHERE p.id_pedido=%s FOR UPDATE OF p",
+                       (id_pedido,)).fetchone()
+        # Un cliente solo ve (y solo puede cancelar) sus propios pedidos.
+        if not p or (user["rol"] == "cliente" and p["dueno"] != user["id_usuario"]):
+            raise HTTPException(404, "Pedido no encontrado.")
+        if user["rol"] == "cliente":
+            if c.estado != "cancelado":
+                raise HTTPException(403, "Solo el empleado o el administrador marcan un pedido como entregado.")
+            if p["id_empleado"] is not None:
+                raise HTTPException(403, "Una venta presencial solo la puede cancelar el empleado o el administrador.")
+        if p["estado"] != "confirmado":
+            raise HTTPException(409, f"El pedido ya está {p['estado']}; solo se actualizan pedidos confirmados.")
+        if c.estado == "cancelado":
+            # Devuelve las unidades al inventario, en el mismo orden de bloqueo que las ventas.
+            for d in db.execute("SELECT d.id_medicamento,d.cantidad FROM detalles_pedido d "
+                                "JOIN medicamentos m USING (id_medicamento) WHERE d.id_pedido=%s "
+                                "ORDER BY d.id_medicamento FOR UPDATE OF m", (id_pedido,)).fetchall():
+                db.execute("UPDATE medicamentos SET stock=stock+%s WHERE id_medicamento=%s",
+                           (d["cantidad"], d["id_medicamento"]))
+                db.execute("INSERT INTO movimientos_inventario (id_medicamento,id_usuario,tipo,cantidad,motivo) "
+                           "VALUES (%s,%s,'entrada',%s,%s)",
+                           (d["id_medicamento"], user["id_usuario"], d["cantidad"],
+                            f"Cancelación del pedido #{id_pedido}: {c.motivo}"[:200]))
+        extra = {"estado": c.estado, "actualizado_por": user["correo"]}
+        if c.motivo:
+            extra["motivo_cancelacion"] = c.motivo
+        # El comprobante conserva la copia de la venta y registra el nuevo estado.
+        return db.execute("UPDATE pedidos SET estado=%s, comprobante=COALESCE(comprobante,'{}'::jsonb) || %s "
+                          "WHERE id_pedido=%s RETURNING comprobante",
+                          (c.estado, Jsonb(extra), id_pedido)).fetchone()["comprobante"]
+
+
 @app.get("/api/pedidos/{id_pedido}/comprobante")
 def comprobante(id_pedido: int, user=Depends(current_user), db=Depends(get_db)):
     row = db.execute("SELECT p.comprobante FROM pedidos p JOIN clientes c USING (id_cliente) "

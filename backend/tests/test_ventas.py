@@ -453,3 +453,80 @@ def test_medication_photo_validation(client, monkeypatch, tmp_path):
     assert not list(tmp_path.iterdir())
     for nombre in ("..%2F..%2Fmain.py", "main.py", "1-zz.png"):
         assert client.get(f"/api/imagenes/{nombre}").status_code == 404
+
+
+def online_order(qty=1, mid=2):
+    return {"clave_operacion": str(uuid4()), "metodo_pago": "Nequi/PSE", "direccion": "Calle 1",
+            "cliente": {"tipo_documento": "CC", "documento": "1098765432", "nombre": "Laura", "apellido": "Gómez",
+                        "correo": "cliente@mail.com", "celular": "3001234567"},
+            "items": [{"id_medicamento": mid, "cantidad": qty}]}
+
+
+def test_employee_marks_delivered_and_then_it_cannot_change(client):
+    emp, admin = headers(client), headers(client, "admin@farmacia.com")
+    pid = client.post("/api/pedidos", headers=emp, json=order(qty=2)).json()["id_pedido"]
+    r = client.patch(f"/api/pedidos/{pid}/estado", headers=emp, json={"estado": "entregado"})
+    assert r.status_code == 200 and r.json()["estado"] == "entregado" and r.json()["actualizado_por"] == "empleado@farmacia.com"
+    assert scalar("SELECT estado FROM pedidos WHERE id_pedido=%s", (pid,)) == "entregado"
+    # Un pedido entregado ya no se cancela ni se vuelve a entregar.
+    for body in ({"estado": "cancelado", "motivo": "Error"}, {"estado": "entregado"}):
+        assert client.patch(f"/api/pedidos/{pid}/estado", headers=admin, json=body).status_code == 409
+    assert scalar("SELECT stock FROM medicamentos WHERE id_medicamento=1") == 198
+    # Entregado sigue contando como venta en el informe.
+    assert client.get("/api/informes", headers=admin).json()["ventas"]["resumen"]["unidades"] == 2
+
+
+def test_cancel_returns_stock_and_is_logged(client):
+    emp, admin = headers(client), headers(client, "admin@farmacia.com")
+    body = order(qty=3)
+    body["items"].append({"id_medicamento": 4, "cantidad": 2})
+    pid = client.post("/api/pedidos", headers=emp, json=body).json()["id_pedido"]
+    assert (scalar("SELECT stock FROM medicamentos WHERE id_medicamento=1"), scalar("SELECT stock FROM medicamentos WHERE id_medicamento=4")) == (197, 118)
+    assert client.patch(f"/api/pedidos/{pid}/estado", headers=admin, json={"estado": "cancelado"}).status_code == 422  # sin motivo
+    r = client.patch(f"/api/pedidos/{pid}/estado", headers=admin, json={"estado": "cancelado", "motivo": "El cliente desistió"})
+    assert r.status_code == 200, r.text
+    assert r.json()["estado"] == "cancelado" and r.json()["motivo_cancelacion"] == "El cliente desistió"
+    assert r.json()["items"] and r.json()["total"]  # el comprobante conserva la copia de la venta
+    assert (scalar("SELECT stock FROM medicamentos WHERE id_medicamento=1"), scalar("SELECT stock FROM medicamentos WHERE id_medicamento=4")) == (200, 120)
+    with db() as conn:
+        movs = conn.execute("SELECT id_medicamento,tipo,cantidad,motivo FROM movimientos_inventario "
+                            "WHERE tipo='entrada' ORDER BY id_medicamento").fetchall()
+    assert [(m["id_medicamento"], m["cantidad"]) for m in movs] == [(1, 3), (4, 2)]
+    assert all(m["motivo"] == f"Cancelación del pedido #{pid}: El cliente desistió" for m in movs)
+    # El informe ya no cuenta la venta cancelada.
+    assert client.get("/api/informes", headers=admin).json()["ventas"]["resumen"]["pedidos"] == 0
+    assert client.patch(f"/api/pedidos/{pid}/estado", headers=admin, json={"estado": "cancelado", "motivo": "Otra vez"}).status_code == 409
+
+
+def test_customer_can_only_cancel_own_online_orders(client):
+    emp, cli = headers(client), headers(client, "cliente@mail.com")
+    online = client.post("/api/pedidos", headers=cli, json=online_order(qty=2)).json()["id_pedido"]
+    other = new_customer(client, emp, "777")["id_cliente"]
+    ajeno = client.post("/api/pedidos", headers=emp, json=order(cid=other)).json()["id_pedido"]
+    presencial = client.post("/api/pedidos", headers=emp, json=order(cid=1)).json()["id_pedido"]  # Laura, en mostrador
+    cancel = {"estado": "cancelado", "motivo": "Ya no lo necesito"}
+    assert client.patch(f"/api/pedidos/{online}/estado", headers=cli, json={"estado": "entregado"}).status_code == 403
+    assert client.patch(f"/api/pedidos/{ajeno}/estado", headers=cli, json=cancel).status_code == 404
+    assert client.patch(f"/api/pedidos/{presencial}/estado", headers=cli, json=cancel).status_code == 403
+    assert client.patch("/api/pedidos/9999/estado", headers=emp, json=cancel).status_code == 404
+    assert client.patch(f"/api/pedidos/{online}/estado", json=cancel).status_code == 401
+    assert client.patch(f"/api/pedidos/{online}/estado", headers=emp, json={"estado": "pendiente"}).status_code == 422
+    r = client.patch(f"/api/pedidos/{online}/estado", headers=cli, json=cancel)
+    assert r.status_code == 200 and r.json()["estado"] == "cancelado"
+    assert scalar("SELECT stock FROM medicamentos WHERE id_medicamento=2") == 150
+    mis = {p["id_pedido"]: p["estado"] for p in client.get("/api/pedidos", headers=cli).json()}
+    assert mis[online] == "cancelado" and ajeno not in mis
+
+
+def test_concurrent_cancellations_return_stock_once(client):
+    emp, admin = headers(client), headers(client, "admin@farmacia.com")
+    pid = client.post("/api/pedidos", headers=emp, json=order(qty=5)).json()["id_pedido"]
+    barrier = Barrier(2)
+    def cancel(h):
+        barrier.wait(timeout=10)
+        return client.patch(f"/api/pedidos/{pid}/estado", headers=h, json={"estado": "cancelado", "motivo": "Duplicado"})
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        codes = sorted(r.status_code for r in pool.map(cancel, [emp, admin]))
+    assert codes == [200, 409], codes
+    assert scalar("SELECT stock FROM medicamentos WHERE id_medicamento=1") == 200
+    assert scalar("SELECT count(*) FROM movimientos_inventario WHERE tipo='entrada'") == 1

@@ -202,7 +202,20 @@ en la pestaña Network del navegador.
    empleado real, no asumir siempre ese número en otras instalaciones.
 7. Abre el comprobante y usa **Imprimir / Guardar PDF**.
 
-### D. Fórmula médica
+### D. Estados del pedido: entregar y cancelar
+
+Toda venta nace **confirmada**. En **Ventas registradas** (empleado o administrador):
+
+1. **Marcar entregado** pasa el pedido a `entregado`; desde ahí ya no se puede cancelar.
+2. **Cancelar** pide un motivo, pasa el pedido a `cancelado` y **devuelve las unidades al
+   inventario**, registrando un movimiento de entrada «Cancelación del pedido #n».
+3. El comprobante conserva la copia de la venta y muestra el estado, quién lo canceló y el motivo.
+
+El cliente puede cancelar desde **Mis compras** solo sus compras en línea que sigan confirmadas.
+Los pedidos cancelados no cuentan en el informe de ventas. En pgAdmin revisa `pedidos.estado`,
+`medicamentos.stock` y `movimientos_inventario`.
+
+### E. Fórmula médica
 
 El cliente ve Amoxicilina como **Venta asistida**. Para venderla, el empleado
 selecciona el cliente, indica cantidad, número de fórmula, médico, fechas vigentes
@@ -211,7 +224,7 @@ La tabla `formulas` guarda `valida=TRUE`; el pedido identifica al empleado.
 El sistema registra la revisión humana: no verifica automáticamente documentos
 médicos ni se conecta con un sistema externo.
 
-### E. Gestión de inventario (administrador)
+### F. Gestión de inventario (administrador)
 
 1. Entra con `admin@farmacia.com`.
 2. Pulsa **+ Nuevo medicamento**: completa nombre, mg, forma, laboratorio,
@@ -227,7 +240,7 @@ médicos ni se conecta con un sistema externo.
    conserva los pedidos y comprobantes anteriores. **Reactivar** lo devuelve.
 6. En pgAdmin, revisa `medicamentos` y `movimientos_inventario`.
 
-### F. Informe de inventario y ventas (administrador)
+### G. Informe de inventario y ventas (administrador)
 
 1. Con la sesión de administrador, pulsa **Generar informe**.
 2. Elige el periodo (por defecto, los últimos 30 días) y el umbral de stock bajo.
@@ -237,7 +250,7 @@ médicos ni se conecta con un sistema externo.
 4. Usa **Imprimir / Guardar PDF**. Todas las cifras salen de una sola consulta
    consistente a PostgreSQL y solo cuentan pedidos confirmados o entregados.
 
-### G. Rollback y concurrencia
+### H. Rollback y concurrencia
 
 No alteres el stock de la BD principal para preparar la demostración. Ejecuta las
 pruebas de la sección siguiente en `farmacia_test`. Muestra especialmente:
@@ -249,6 +262,7 @@ pruebas de la sección siguiente en `farmacia_test`. Muestra especialmente:
 - Dos ventas del mismo cliente no mezclan reservas.
 - Un cliente no puede consultar comprobantes ajenos ni registrar clientes.
 - Un ajuste de stock y una venta simultáneos por la última unidad: solo uno se aplica.
+- Dos cancelaciones simultáneas del mismo pedido devuelven el stock una sola vez.
 
 ## Ejecutar pruebas con PostgreSQL real
 
@@ -284,6 +298,7 @@ Para revisar el frontend: `cd frontend` y `npm.cmd run build`.
 | GET | /api/pedidos | Cliente: propios; empleado/admin: todas las ventas |
 | POST | /api/pedidos | Cliente o empleado |
 | GET | /api/pedidos/{id}/comprobante | Propietario, empleado o admin |
+| PATCH | /api/pedidos/{id}/estado | Empleado/admin: `entregado` o `cancelado` (con motivo). Cliente: solo cancelar sus compras en línea |
 | GET | /api/inventario, /api/inventario/movimientos | Administrador |
 | POST | /api/medicamentos | Administrador: registrar (con stock inicial) |
 | PUT | /api/medicamentos/{id} | Administrador: editar datos y precio |

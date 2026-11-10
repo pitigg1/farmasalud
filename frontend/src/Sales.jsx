@@ -64,16 +64,52 @@ function Payment({ value, onChange }) {
   return <><label htmlFor="payment">Método de pago registrado</label><select id="payment" value={value} onChange={e => onChange(e.target.value)}>{['Efectivo', 'Datafono', 'Nequi/PSE'].map(p => <option key={p}>{p}</option>)}</select></>
 }
 
-export function Orders({ auth, onReceipt, version = 0 }) {
+const ESTADO_COLOR = { confirmado: null, entregado: { background: '#DBEAFE', color: '#1D4ED8' }, cancelado: { background: '#FEE2E2', color: '#B91C1C' } }
+export const Estado = ({ value }) => <span className="est" style={ESTADO_COLOR[value]}>{value}</span>
+
+// Actualizar estado de pedido (entregado) o cancelarlo (devuelve las unidades al inventario).
+function CambioEstado({ auth, pedido, estado, close, onDone }) {
+  const [motivo, setMotivo] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const cancelar = estado === 'cancelado'
+  const submit = async e => {
+    e.preventDefault(); setBusy(true); setError('')
+    try { await api(`/pedidos/${pedido.id_pedido}/estado`, { method: 'PATCH', token: auth.token, body: { estado, ...(cancelar ? { motivo } : {}) } }); onDone() }
+    catch (x) { setError(message(x)) } finally { setBusy(false) }
+  }
+  return <div className="scrim"><form className="modal w" onSubmit={submit}>
+    <button type="button" className="x" onClick={close} aria-label="Cerrar">×</button>
+    <h2>{cancelar ? 'Cancelar' : 'Marcar como entregado'} el pedido FS-{pedido.id_pedido}</h2>
+    <p className="mute">{pedido.cliente} · {pedido.fecha_pedido} · {fmt(pedido.total)}</p>
+    <fieldset disabled={busy}>
+      {cancelar ? <><p className="note">Las unidades vendidas vuelven al inventario y queda registrado el movimiento. Esta acción no se puede deshacer.</p>
+        <label htmlFor="motivo">Motivo de la cancelación</label><input id="motivo" required minLength={3} maxLength={150} autoFocus placeholder="Ej.: el cliente desistió de la compra" value={motivo} onChange={e => setMotivo(e.target.value)} /></>
+        : <p>Confirma que el cliente ya recibió los productos. Un pedido entregado ya no se puede cancelar.</p>}
+      <p className="err" role="alert">{error}</p>
+      <div className="subform-acts"><button type="button" className="link" onClick={close}>Volver</button>
+        <button className="yel">{busy ? 'Guardando…' : cancelar ? 'Cancelar pedido' : 'Confirmar entrega'}</button></div>
+    </fieldset>
+  </form></div>
+}
+
+export function Orders({ auth, onReceipt, version = 0, onChange }) {
   const [rows, setRows] = useState([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [cambio, setCambio] = useState(null)  // { pedido, estado }
   const load = () => { setLoading(true); setError(''); api('/pedidos', { token: auth.token }).then(setRows).catch(x => setError(message(x))).finally(() => setLoading(false)) }
   useEffect(load, [auth.token, version])
+  const staff = auth.rol !== 'cliente'
+  const acciones = r => r.estado !== 'confirmado' ? null : <>
+    {staff && <button onClick={() => setCambio({ pedido: r, estado: 'entregado' })}>Marcar entregado</button>}
+    {(staff || !r.id_empleado) && <button className="del" onClick={() => setCambio({ pedido: r, estado: 'cancelado' })}>Cancelar</button>}
+  </>
   return <section className="panel orders"><div className="section-head"><h2>{auth.rol === 'cliente' ? 'Mis compras y comprobantes' : 'Ventas registradas'}</h2><button className="link" onClick={load}>Actualizar ventas</button></div>
-    <p className="err" role="alert">{error}</p>{loading ? <p>Cargando ventas…</p> : <div className="table-scroll"><table><thead><tr><th>Venta</th><th>Fecha</th><th>Cliente</th><th>Empleado</th><th>Total</th><th>Estado</th><th>Comprobante</th></tr></thead><tbody>
-      {rows.map(r => <tr key={r.id_pedido}><td>FS-{r.id_pedido}</td><td>{r.fecha_pedido}</td><td>{r.cliente}</td><td>{r.empleado || 'Compra del cliente'}</td><td>{fmt(r.total)}</td><td>{r.estado}</td><td><button className="link" onClick={() => onReceipt(r.id_pedido)}>Ver comprobante</button></td></tr>)}
+    <p className="err" role="alert">{error}</p>{loading ? <p>Cargando ventas…</p> : <div className="table-scroll"><table><thead><tr><th>Venta</th><th>Fecha</th><th>Cliente</th><th>Empleado</th><th>Total</th><th>Estado</th><th>Comprobante</th><th>Acciones</th></tr></thead><tbody>
+      {rows.map(r => <tr key={r.id_pedido}><td>FS-{r.id_pedido}</td><td>{r.fecha_pedido}</td><td>{r.cliente}</td><td>{r.empleado || 'Compra del cliente'}</td><td>{fmt(r.total)}</td><td><Estado value={r.estado} /></td><td><button className="link" onClick={() => onReceipt(r.id_pedido)}>Ver comprobante</button></td><td className="acts">{acciones(r)}</td></tr>)}
     </tbody></table>{!rows.length && !error && <p className="mute">Todavía no hay ventas registradas.</p>}</div>}
+    {cambio && <CambioEstado auth={auth} pedido={cambio.pedido} estado={cambio.estado} close={() => setCambio(null)} onDone={() => { setCambio(null); load(); onChange?.() }} />}
   </section>
 }
 
@@ -130,7 +166,7 @@ export function Seller({ auth, meds, reload, onReceipt }) {
         <p className="err" role="alert">{sale.error}</p><button className="yel" disabled={!client || !ids.length || sale.busy || clientBusy}>{sale.busy ? 'Confirmando…' : 'Confirmar venta y generar comprobante'}</button>
       </fieldset>
     </form>
-    <Orders auth={auth} version={version} onReceipt={onReceipt} />
+    <Orders auth={auth} version={version} onReceipt={onReceipt} onChange={reload} />
   </>
 }
 
@@ -144,7 +180,8 @@ export function Receipt({ id, auth, close }) {
     <div className="no-print section-head"><button className="link" onClick={close}>Cerrar comprobante</button>{data && <button className="yel" onClick={() => window.print()}>Imprimir / Guardar PDF</button>}</div>
     {error && <p className="err">{error} <button onClick={load}>Reintentar consulta</button></p>}
     {!data ? <p>Cargando comprobante desde PostgreSQL…</p> : <>
-      <h1>FarmaSalud</h1><h2>Comprobante de venta {data.numero}</h2><p>Fecha: {data.fecha} · Estado: {data.estado}</p>
+      <h1>FarmaSalud</h1><h2>Comprobante de venta {data.numero}</h2><p>Fecha: {data.fecha} · Estado: <Estado value={data.estado} /></p>
+      {data.estado === 'cancelado' && <p className="note">Pedido cancelado{data.actualizado_por ? ` por ${data.actualizado_por}` : ''}. Motivo: {data.motivo_cancelacion}. Las unidades volvieron al inventario.</p>}
       <div className="sum"><p><b>Cliente:</b> {data.cliente.nombre}</p><p>{data.cliente.tipo_documento} {data.cliente.documento}</p><p>{data.cliente.correo} · {data.cliente.celular}</p><p><b>Empleado:</b> {data.empleado || 'Compra del cliente'}</p><p><b>Dirección:</b> {data.direccion}</p><p><b>Método de pago:</b> {data.metodo_pago}</p></div>
       <div className="table-scroll"><table><thead><tr><th>Producto</th><th>Cantidad</th><th>Precio unitario</th><th>Subtotal</th></tr></thead><tbody>{data.items.map(i => <tr key={i.id_medicamento}><td>{i.nombre}</td><td>{i.cantidad}</td><td>{fmt(i.precio)}</td><td>{fmt(i.subtotal)}</td></tr>)}</tbody></table></div>
       <div className="totbox"><b>Total COP</b><b>{fmt(data.total)}</b></div><p className="mute">Comprobante académico. No constituye factura electrónica ni confirmación de pago electrónico.</p>

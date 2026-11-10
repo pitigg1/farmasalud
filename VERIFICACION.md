@@ -145,6 +145,27 @@ archivos que no son imagen (incluido SVG) o superan 2 MB; permisos; nombres de a
 manipulados en `/api/imagenes`. En Edge: alta de laboratorio y categoría en el formulario,
 alta con foto y visualización en inventario y catálogo, sin errores ni ventanas emergentes.
 
+## Actualización — 9 de noviembre de 2026: estados del pedido
+
+Se implementaron los casos de uso **Actualizar estado de pedido** y **Cancelar pedido**
+(`PATCH /api/pedidos/{id}/estado`), sin cambios en el esquema: la columna `estado` ya
+admitía `entregado` y `cancelado`.
+
+- Solo se actualizan pedidos `confirmado`; un pedido entregado o cancelado ya no cambia (409).
+- Cancelar exige motivo, devuelve las unidades al inventario y registra movimientos de entrada,
+  todo en una transacción con bloqueo del pedido; el comprobante guarda estado, usuario y motivo.
+- Empleado y administrador entregan o cancelan; el cliente solo cancela sus compras en línea.
+- El informe de ventas excluye los pedidos cancelados.
+
+```text
+30 passed   (PostgreSQL 16.2, base farmacia_test)
+```
+
+Pruebas nuevas: entrega y bloqueo posterior; cancelación con devolución de stock y movimientos;
+permisos del cliente (propias, en línea, sin marcar entregado); dos cancelaciones simultáneas
+devuelven el stock una sola vez (repetida 5 veces). En Edge: entrega, cancelación con motivo,
+comprobante cancelado y vista del cliente, sin errores ni ventanas emergentes.
+
 ## Alcance y pendientes
 
 El comprobante es académico e imprimible; no es facturación electrónica ni un cobro.

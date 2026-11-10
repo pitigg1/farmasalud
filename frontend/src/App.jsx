@@ -80,7 +80,7 @@ export default function App() {
               <div className="promo"><span>VENTA ASISTIDA</span><b>¿Tu medicamento requiere fórmula médica?</b><p>Acércate a la droguería con tu fórmula: nuestro boticario la revisa y te atiende.</p></div>
             </aside>
             <main>
-              {history && auth ? <Orders auth={auth} onReceipt={id => setOrder(id)} /> : <>
+              {history && auth ? <Orders auth={auth} onReceipt={id => setOrder(id)} onChange={loadMeds} /> : <>
               <section className="hero">
                 <div><span className="lbl">TU SALUD EN BUENAS MANOS</span><h1>Encuentra tus medicamentos con entrega prioritaria</h1>
                   <p>Consulta existencias y compra tus medicamentos. Los productos con fórmula requieren atención del empleado.</p><button className="yel" onClick={loadMeds}>Actualizar existencias</button></div>
@@ -110,7 +110,7 @@ export default function App() {
         {role === 'admin' && <>
           <section className="banner"><div><h1>Administración FarmaSalud</h1><p>Gestión de inventario, ventas e informes.</p></div><button className="yel" onClick={() => setReport(true)}>Generar informe</button></section>
           <Inventario auth={auth} onChange={loadMeds} />
-          <Orders auth={auth} onReceipt={setOrder} />
+          <Orders auth={auth} onReceipt={setOrder} onChange={loadMeds} />
         </>}
       </div>
 
