@@ -5,8 +5,8 @@
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "base_url", "value": "http://localhost:8000" },
-    { "key": "api_key", "value": "clave-demo-uds" },
+    { "key": "base_url", "value": "https://farmasalud-n8uf.onrender.com" },
+    { "key": "api_key", "value": "farmasalud-uds-2026" },
     { "key": "admin_correo", "value": "admin@farmacia.com" },
     { "key": "admin_clave", "value": "Admin2026*" },
     { "key": "uds_externa", "value": "espejo" },
