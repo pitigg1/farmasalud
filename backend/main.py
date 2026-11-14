@@ -5,6 +5,9 @@ import logging
 import os
 import re
 import secrets
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -17,6 +20,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -37,15 +41,31 @@ elif len(SECRET) < 32:
 # Contraseña inicial de las cuentas precargadas (marcador REEMPLAZAR_POR_HASH en schema.sql).
 CLAVE_INICIAL = os.getenv("CLAVE_INICIAL", "")
 CLAVE_DEMO_ANTIGUA = "farmacia123"  # solo para advertir si una cuenta aún la usa
+# Contraseñas iniciales fijas de las cuentas precargadas (documentadas en el README).
+# Se asignan una sola vez, sobre una base nueva; cada usuario debe cambiarla después.
+CLAVES_INICIALES = {
+    "admin@farmacia.com": "Admin2026*",
+    "empleado@farmacia.com": "Empleado2026*",
+    "cliente@mail.com": "Cliente2026*",
+}
+CLAVE_INICIAL_GENERAL = "FarmaSalud2026*"  # cualquier otra cuenta precargada con el marcador
 app = FastAPI(title="API FarmaSalud", version="0.3.0")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"],
-                   allow_methods=["*"], allow_headers=["*"])
+# Orígenes permitidos (separados por comas). En producción el frontend lo sirve esta misma API,
+# así que solo hace falta si el frontend se publica en otro dominio.
+ORIGENES = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",") if o.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=ORIGENES, allow_methods=["*"], allow_headers=["*"])
 
 
 def connect():
     # Las escrituras usan transacciones explícitas: commit ANTES de responder éxito.
-    return psycopg.connect(DSN, autocommit=True, row_factory=dict_row,
-                           options="-c search_path=farmacia,public -c timezone=America/Bogota")
+    # search_path y zona horaria se fijan con SET (el pooler de Supabase no acepta "options").
+    conn = psycopg.connect(DSN, autocommit=True, row_factory=dict_row, prepare_threshold=None)
+    try:
+        conn.execute("SET search_path TO farmacia, public; SET timezone TO 'America/Bogota'")
+    except Exception:
+        conn.close()
+        raise
+    return conn
 
 
 def get_db():
@@ -69,15 +89,15 @@ def fijar_hashes():
         db.execute("SELECT clave_operacion, comprobante FROM pedidos LIMIT 0")
         pendientes = db.execute("SELECT id_usuario,correo FROM usuarios "
                                 "WHERE password_hash='REEMPLAZAR_POR_HASH'").fetchall()
-        if pendientes:
-            clave = CLAVE_INICIAL or secrets.token_urlsafe(12)
-            if len(clave) < 8 or clave.lower() == CLAVE_DEMO_ANTIGUA:
-                raise RuntimeError("CLAVE_INICIAL debe tener al menos 8 caracteres y no ser farmacia123.")
-            for u in pendientes:
-                db.execute("UPDATE usuarios SET password_hash=%s WHERE id_usuario=%s", (hash_pw(clave), u["id_usuario"]))
-            if not CLAVE_INICIAL:
-                log.warning("Contraseña inicial de %s: %s  (cámbiala después de iniciar sesión)",
-                            ", ".join(u["correo"] for u in pendientes), clave)
+        if CLAVE_INICIAL and (len(CLAVE_INICIAL) < 8 or CLAVE_INICIAL.lower() == CLAVE_DEMO_ANTIGUA):
+            raise RuntimeError("CLAVE_INICIAL debe tener al menos 8 caracteres y no ser farmacia123.")
+        for u in pendientes:
+            # CLAVE_INICIAL (si se configura) reemplaza las contraseñas iniciales documentadas.
+            clave = CLAVE_INICIAL or CLAVES_INICIALES.get(u["correo"], CLAVE_INICIAL_GENERAL)
+            db.execute("UPDATE usuarios SET password_hash=%s WHERE id_usuario=%s", (hash_pw(clave), u["id_usuario"]))
+        if pendientes and not CLAVE_INICIAL:
+            log.warning("Cuentas %s creadas con las contraseñas iniciales del README: cámbialas al iniciar sesión.",
+                        ", ".join(u["correo"] for u in pendientes))
         for u in db.execute("SELECT correo,password_hash FROM usuarios WHERE activo "
                             "AND (rol IN ('admin','empleado') OR correo='cliente@mail.com')").fetchall():
             if check_pw(CLAVE_DEMO_ANTIGUA, u["password_hash"]):
@@ -387,12 +407,62 @@ def crear_categoria(c: CategoriaIn, user=Depends(admin_only), db=Depends(get_db)
         raise HTTPException(409, "Esa categoría ya existe.")
 
 
-# ---------- Foto del medicamento (columna imagen_url; el archivo se guarda en IMAGENES_DIR) ----------
+# ---------- Foto del medicamento (columna imagen_url) ----------
+# Con SUPABASE_URL y SUPABASE_SERVICE_KEY el archivo va a Supabase Storage (bucket público);
+# sin ellas se guarda en IMAGENES_DIR (desarrollo local y pruebas).
 IMAGENES_DIR = Path(os.getenv("IMAGENES_DIR", str(Path(__file__).resolve().parent / "imagenes")))
 IMAGEN_MAX_BYTES = 2 * 1024 * 1024
 IMAGEN_URL = "/api/imagenes/"
 IMAGEN_NOMBRE = re.compile(r"^\d+-[0-9a-f]{16}\.(jpg|png|webp)$")
 IMAGEN_TIPOS = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "medicamentos")
+
+
+def usa_storage() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_KEY)
+
+
+def url_publica_storage() -> str:
+    return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/"
+
+
+def storage(metodo: str, nombre: str, data: Optional[bytes] = None, tipo: Optional[str] = None):
+    req = urllib.request.Request(f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{nombre}",
+                                 data=data, method=metodo)
+    req.add_header("Authorization", f"Bearer {SUPABASE_KEY}")
+    req.add_header("apikey", SUPABASE_KEY)
+    if tipo:
+        req.add_header("Content-Type", tipo)
+        req.add_header("Cache-Control", "86400")
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return r.status
+
+
+def escribir_archivo(nombre: str, data: bytes) -> str:
+    if usa_storage():
+        try:
+            storage("POST", nombre, data, IMAGEN_TIPOS[nombre.rsplit(".", 1)[1]])
+        except (urllib.error.URLError, TimeoutError) as e:
+            log.error("No se pudo subir la foto a Supabase Storage: %s", e)
+            raise HTTPException(502, "No se pudo guardar la foto. Intenta de nuevo.")
+        return url_publica_storage() + nombre
+    IMAGENES_DIR.mkdir(parents=True, exist_ok=True)
+    (IMAGENES_DIR / nombre).write_bytes(data)
+    return IMAGEN_URL + nombre
+
+
+def borrar_nombre(nombre: str):
+    if not IMAGEN_NOMBRE.match(nombre):
+        return
+    if usa_storage():
+        try:
+            storage("DELETE", nombre)
+        except (urllib.error.URLError, TimeoutError) as e:
+            log.warning("No se pudo borrar %s de Supabase Storage: %s", nombre, e)
+    else:
+        (IMAGENES_DIR / nombre).unlink(missing_ok=True)
 
 
 def tipo_imagen(data: bytes) -> Optional[str]:
@@ -407,9 +477,8 @@ def tipo_imagen(data: bytes) -> Optional[str]:
 
 
 def borrar_archivo_imagen(url: Optional[str]):
-    nombre = url[len(IMAGEN_URL):] if url and url.startswith(IMAGEN_URL) else ""
-    if IMAGEN_NOMBRE.match(nombre):
-        (IMAGENES_DIR / nombre).unlink(missing_ok=True)
+    prefijo = url_publica_storage() if usa_storage() else IMAGEN_URL
+    borrar_nombre(url[len(prefijo):] if url and url.startswith(prefijo) else "")
 
 
 def guardar_imagen(db, id_medicamento: int, data: bytes, ext: str):
@@ -419,13 +488,11 @@ def guardar_imagen(db, id_medicamento: int, data: bytes, ext: str):
                             (id_medicamento,)).fetchone()
         if not actual:
             raise HTTPException(404, "Medicamento no encontrado.")
-        IMAGENES_DIR.mkdir(parents=True, exist_ok=True)
-        (IMAGENES_DIR / nombre).write_bytes(data)
+        url = escribir_archivo(nombre, data)
         try:
-            db.execute("UPDATE medicamentos SET imagen_url=%s WHERE id_medicamento=%s",
-                       (IMAGEN_URL + nombre, id_medicamento))
+            db.execute("UPDATE medicamentos SET imagen_url=%s WHERE id_medicamento=%s", (url, id_medicamento))
         except Exception:
-            (IMAGENES_DIR / nombre).unlink(missing_ok=True)
+            borrar_nombre(nombre)
             raise
     borrar_archivo_imagen(actual["imagen_url"])  # solo después de confirmar el cambio
     return medicamento_admin(db, id_medicamento)
@@ -698,3 +765,141 @@ def crear_pedido(p: PedidoIn, user=Depends(current_user), db=Depends(get_db)):
         raise HTTPException(409, "El cliente o la operación ya están registrados. Actualiza los datos.")
     except psycopg.errors.CheckViolation:
         raise HTTPException(409, "No se pudo completar la venta: revisa las cantidades disponibles.")
+
+
+# ---------- Integración con otras UDS (UC12 exponer inventario · UC13 consultar otras UDS) ----------
+# Formato de intercambio común: ProductoGenerico. Versión en la ruta (/v1) para poder cambiarlo sin romper a nadie.
+UDS_NOMBRE = os.getenv("UDS_NOMBRE", "FarmaSalud")
+# Claves que pueden usar otras UDS para consultarnos (separadas por comas). Vacía = API abierta.
+UDS_API_KEYS = [k.strip() for k in os.getenv("UDS_API_KEYS", "").split(",") if k.strip()]
+# Otras UDS que podemos consultar, en JSON: [{"nombre": "...", "url": ".../productos", "api_key": "..."}]
+try:
+    UDS_EXTERNAS = {u["nombre"].strip().lower(): u for u in json.loads(os.getenv("UDS_EXTERNAS", "") or "[]")}
+except (ValueError, KeyError, TypeError, AttributeError):
+    raise RuntimeError('UDS_EXTERNAS debe ser JSON: [{"nombre": "...", "url": "https://...", "api_key": "..."}]')
+UDS_TIMEOUT = 10
+
+
+class ProductoGenerico(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+    codigo: str = Field(min_length=1, max_length=60)
+    nombre: str = Field(min_length=1, max_length=200)
+    concentracion_mg: Optional[int] = None
+    presentacion: Optional[str] = None
+    categoria: Optional[str] = None
+    laboratorio: Optional[str] = None
+    precio: float = Field(ge=0)  # número JSON (no texto) para que cualquier lenguaje lo lea igual
+    moneda: str = "COP"
+    stock_disponible: int = Field(ge=0)
+    requiere_formula: bool = False
+    imagen_url: Optional[str] = None
+    uds_origen: str = Field(min_length=1, max_length=100)
+
+
+class RespuestaUDS(BaseModel):
+    uds: str
+    version: str = "1.0"
+    generado_en: datetime
+    total: int
+    productos: List[ProductoGenerico]
+
+
+def cliente_uds(x_api_key: str = Header(default="")):
+    # Las UDS se identifican con una clave (cabecera X-API-Key), no con usuario y contraseña.
+    if UDS_API_KEYS and not any(hmac.compare_digest(x_api_key, k) for k in UDS_API_KEYS):
+        raise HTTPException(401, "Falta la cabecera X-API-Key o la clave no es válida.")
+
+
+PRODUCTOS_UDS = """
+SELECT 'FS-' || m.id_medicamento AS codigo, m.nombre, m.mg AS concentracion_mg, m.forma AS presentacion,
+       c.nombre AS categoria, l.nombre AS laboratorio, m.precio, GREATEST(v.disponible, 0) AS stock_disponible,
+       m.requiere_formula, m.imagen_url
+FROM medicamentos m JOIN categorias c USING (id_categoria)
+JOIN laboratorios l USING (id_laboratorio) JOIN v_stock_disponible v USING (id_medicamento)
+WHERE m.activo AND m.nombre ILIKE %(q)s AND (%(categoria)s = '' OR c.nombre ILIKE %(categoria)s)
+  AND (NOT %(solo)s OR v.disponible > 0) AND (%(id)s::INT IS NULL OR m.id_medicamento = %(id)s)
+ORDER BY m.nombre
+"""
+
+
+def productos_uds(db, request: Request, q="", categoria="", solo=False, id_med=None) -> List[dict]:
+    base = str(request.base_url).rstrip("/")
+    filas = db.execute(PRODUCTOS_UDS, {"q": f"%{q}%", "categoria": categoria, "solo": solo, "id": id_med}).fetchall()
+    for f in filas:
+        f["uds_origen"] = UDS_NOMBRE
+        f["moneda"] = "COP"
+        if f["imagen_url"] and f["imagen_url"].startswith("/"):
+            f["imagen_url"] = base + f["imagen_url"]  # URL completa para que la otra app pueda mostrarla
+    return filas
+
+
+@app.get("/api/uds/v1/productos", response_model=RespuestaUDS, tags=["Integración UDS"],
+         summary="UC12 · Exponer inventario a otras UDS")
+def uds_productos(request: Request, q: str = Query(default="", max_length=100),
+                  categoria: str = Query(default="", max_length=100), solo_disponibles: bool = False,
+                  _=Depends(cliente_uds), db=Depends(get_db)):
+    productos = productos_uds(db, request, q, categoria, solo_disponibles)
+    return {"uds": UDS_NOMBRE, "generado_en": datetime.now(timezone.utc), "total": len(productos),
+            "productos": productos}
+
+
+@app.get("/api/uds/v1/productos/{codigo}", response_model=ProductoGenerico, tags=["Integración UDS"],
+         summary="UC12 · Consultar un producto por código (FS-<id>)")
+def uds_producto(codigo: str, request: Request, _=Depends(cliente_uds), db=Depends(get_db)):
+    m = re.fullmatch(r"FS-(\d{1,9})", codigo.strip().upper())
+    filas = productos_uds(db, request, id_med=int(m.group(1))) if m else []
+    if not filas:
+        raise HTTPException(404, f"No existe el producto {codigo}.")
+    return filas[0]
+
+
+def leer_uds_externa(uds: dict, q: str) -> dict:
+    url = uds["url"] + ("&" if "?" in uds["url"] else "?") + urllib.parse.urlencode({"q": q})
+    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": f"{UDS_NOMBRE}-UDS/1.0"})
+    if uds.get("api_key"):
+        req.add_header("X-API-Key", uds["api_key"])
+    try:
+        with urllib.request.urlopen(req, timeout=UDS_TIMEOUT) as r:
+            datos = json.loads(r.read(5 * 1024 * 1024))
+    except urllib.error.HTTPError as e:
+        raise HTTPException(502, f"La UDS {uds['nombre']} respondió con error {e.code}.")
+    except (urllib.error.URLError, TimeoutError):
+        raise HTTPException(504, f"No se pudo conectar con la UDS {uds['nombre']}.")
+    except ValueError:
+        raise HTTPException(502, f"La UDS {uds['nombre']} no respondió con JSON válido.")
+    # Se acepta {"productos": [...]} o una lista directa; los productos con formato inválido se descartan.
+    lista = datos.get("productos") if isinstance(datos, dict) else datos
+    if not isinstance(lista, list):
+        raise HTTPException(502, f"La UDS {uds['nombre']} no respondió con el formato ProductoGenerico.")
+    validos, descartados = [], 0
+    for p in lista:
+        try:
+            if isinstance(p, dict):
+                p = {"uds_origen": uds["nombre"], **p}
+            validos.append(ProductoGenerico.model_validate(p))
+        except ValueError:
+            descartados += 1
+    return {"uds": uds["nombre"], "consultado_en": datetime.now(timezone.utc), "total": len(validos),
+            "descartados": descartados, "productos": validos}
+
+
+@app.get("/api/uds/externas", tags=["Integración UDS"], summary="UC13 · Listar las UDS configuradas")
+def uds_externas(user=Depends(admin_only)):
+    return [{"nombre": u["nombre"], "url": u["url"]} for u in UDS_EXTERNAS.values()]
+
+
+@app.get("/api/uds/externas/{nombre}/productos", tags=["Integración UDS"],
+         summary="UC13 · Consultar el inventario de otra UDS")
+def uds_externa_productos(nombre: str, q: str = Query(default="", max_length=100), user=Depends(admin_only)):
+    uds = UDS_EXTERNAS.get(nombre.strip().lower())
+    if not uds:
+        raise HTTPException(404, f"La UDS '{nombre}' no está configurada. Revisa GET /api/uds/externas.")
+    return leer_uds_externa(uds, q)
+
+
+# ---------- Frontend compilado (producción) ----------
+# El Dockerfile copia frontend/dist en FRONTEND_DIR; así API y página comparten dominio (sin CORS).
+# Se monta al final para que las rutas /api tengan prioridad.
+FRONTEND_DIR = Path(os.getenv("FRONTEND_DIR", str(Path(__file__).resolve().parent / "static")))
+if (FRONTEND_DIR / "index.html").is_file():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

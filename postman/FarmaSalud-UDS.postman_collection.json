@@ -1,0 +1,150 @@
+{
+  "info": {
+    "name": "FarmaSalud · Integración con otras UDS",
+    "description": "Demostración de UC12 (exponer inventario en formato ProductoGenerico) y UC13 (consultar el inventario de otra UDS).\n\nAntes de empezar, edita las variables de la colección: base_url, api_key, admin_correo y admin_clave.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "api_key", "value": "clave-demo-uds" },
+    { "key": "admin_correo", "value": "admin@farmacia.com" },
+    { "key": "admin_clave", "value": "Admin2026*" },
+    { "key": "uds_externa", "value": "espejo" },
+    { "key": "token", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1 · UC12 · Enviar: otras UDS nos consultan",
+      "item": [
+        {
+          "name": "1.1 Sin clave → 401 (la API está protegida)",
+          "request": { "method": "GET", "url": "{{base_url}}/api/uds/v1/productos" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Rechaza la petición sin X-API-Key (401)', () => pm.response.to.have.status(401));"
+          ] } }]
+        },
+        {
+          "name": "1.2 Inventario completo (ProductoGenerico)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }],
+            "url": "{{base_url}}/api/uds/v1/productos"
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "const body = pm.response.json();",
+            "pm.test('Responde 200', () => pm.response.to.have.status(200));",
+            "pm.test('Identifica a la UDS que responde', () => pm.expect(body.uds).to.eql('FarmaSalud'));",
+            "pm.test('total coincide con la lista', () => pm.expect(body.total).to.eql(body.productos.length));",
+            "pm.test('Cada producto cumple el formato ProductoGenerico', () => body.productos.forEach(p => {",
+            "  pm.expect(p).to.include.keys('codigo','nombre','precio','moneda','stock_disponible','requiere_formula','uds_origen');",
+            "  pm.expect(p.precio).to.be.a('number');",
+            "  pm.expect(p.stock_disponible).to.be.a('number');",
+            "}));",
+            "if (body.productos.length) pm.collectionVariables.set('codigo', body.productos[0].codigo);"
+          ] } }]
+        },
+        {
+          "name": "1.3 Buscar por nombre (q=amox)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }],
+            "url": { "raw": "{{base_url}}/api/uds/v1/productos?q=amox",
+              "host": ["{{base_url}}"], "path": ["api", "uds", "v1", "productos"],
+              "query": [{ "key": "q", "value": "amox" }] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Solo devuelve productos que coinciden', () => pm.response.json().productos.forEach(p =>",
+            "  pm.expect(p.nombre.toLowerCase()).to.include('amox')));"
+          ] } }]
+        },
+        {
+          "name": "1.4 Solo con stock disponible",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }],
+            "url": { "raw": "{{base_url}}/api/uds/v1/productos?solo_disponibles=true",
+              "host": ["{{base_url}}"], "path": ["api", "uds", "v1", "productos"],
+              "query": [{ "key": "solo_disponibles", "value": "true" }] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Todos tienen unidades disponibles', () => pm.response.json().productos.forEach(p =>",
+            "  pm.expect(p.stock_disponible).to.be.above(0)));"
+          ] } }]
+        },
+        {
+          "name": "1.5 Un producto por código",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }],
+            "url": "{{base_url}}/api/uds/v1/productos/{{codigo}}"
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Devuelve el producto pedido', () => pm.expect(pm.response.json().codigo).to.eql(pm.collectionVariables.get('codigo')));"
+          ] } }]
+        },
+        {
+          "name": "1.6 Código que no existe → 404",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }],
+            "url": "{{base_url}}/api/uds/v1/productos/FS-999999"
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Responde 404 con mensaje claro', () => { pm.response.to.have.status(404); pm.expect(pm.response.json().detail).to.include('FS-999999'); });"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "2 · UC13 · Recibir: consultamos otra UDS",
+      "item": [
+        {
+          "name": "2.1 Iniciar sesión como administrador (guarda el token)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"correo\": \"{{admin_correo}}\",\n  \"password\": \"{{admin_clave}}\"\n}" },
+            "url": "{{base_url}}/api/auth/login"
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Inicia sesión (200)', () => pm.response.to.have.status(200));",
+            "pm.collectionVariables.set('token', pm.response.json().token);"
+          ] } }]
+        },
+        {
+          "name": "2.2 UDS configuradas",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": "{{base_url}}/api/uds/externas"
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Lista las UDS sin mostrar sus claves', () => pm.response.json().forEach(u => pm.expect(u).to.not.have.property('api_key')));"
+          ] } }]
+        },
+        {
+          "name": "2.3 Inventario de otra UDS",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": "{{base_url}}/api/uds/externas/{{uds_externa}}/productos"
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "const body = pm.response.json();",
+            "pm.test('Responde 200', () => pm.response.to.have.status(200));",
+            "pm.test('Los productos recibidos quedan en formato ProductoGenerico', () => body.productos.forEach(p =>",
+            "  pm.expect(p).to.include.keys('codigo','nombre','precio','stock_disponible','uds_origen')));",
+            "console.log('Recibidos:', body.total, '· descartados por formato inválido:', body.descartados);"
+          ] } }]
+        },
+        {
+          "name": "2.4 Sin iniciar sesión → 401",
+          "request": { "method": "GET", "url": "{{base_url}}/api/uds/externas/{{uds_externa}}/productos" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Solo el administrador puede consultar otras UDS', () => pm.response.to.have.status(401));"
+          ] } }]
+        }
+      ]
+    }
+  ]
+}

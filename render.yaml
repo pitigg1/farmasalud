@@ -1,0 +1,23 @@
+# Despliegue en Render (plan gratis). Base de datos y fotos: Supabase.
+services:
+  - type: web
+    name: farmasalud
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    envVars:
+      - key: DATABASE_URL        # cadena "Session pooler" de Supabase
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: SUPABASE_URL        # https://<proyecto>.supabase.co
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        value: medicamentos
+      - key: UDS_API_KEYS        # claves para que otras UDS nos consulten (X-API-Key)
+        sync: false
+      - key: UDS_EXTERNAS        # JSON con las UDS que podemos consultar
+        sync: false

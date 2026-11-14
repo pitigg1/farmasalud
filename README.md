@@ -74,8 +74,9 @@ Antes, define las claves de seguridad. La API **no trae claves fijas**:
 
 - `JWT_SECRET`: firma las sesiones; mínimo 32 caracteres. Si falta, la API usa una
   clave temporal y las sesiones se cierran cada vez que se reinicia.
-- `CLAVE_INICIAL`: contraseña de las cuentas precargadas en una base **nueva**;
-  mínimo 8 caracteres. Si falta, la API genera una aleatoria y la muestra en su registro.
+- `CLAVE_INICIAL` (opcional): si se define, reemplaza las contraseñas iniciales de las
+  cuentas precargadas en una base **nueva**; mínimo 8 caracteres. Si falta, se usan las
+  contraseñas fijas de la tabla de [cuentas precargadas](#5-cuentas-precargadas).
 
 Para generar una clave segura: `py -3.12 -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
@@ -105,7 +106,6 @@ py -3.12 -m venv .venv312
 .\.venv312\Scripts\python.exe -m pip install -r requirements.txt
 $env:DATABASE_URL = "postgresql://farmacia:farmacia@127.0.0.1:5433/farmacia"
 $env:JWT_SECRET = .\.venv312\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
-$env:CLAVE_INICIAL = "elige-una-clave-segura"
 .\.venv312\Scripts\python.exe -m uvicorn main:app --reload --port 8000
 ```
 
@@ -133,10 +133,12 @@ puerto silenciosamente.
 
 | Correo | Contraseña inicial | Función |
 |---|---|---|
-| cliente@mail.com | `CLAVE_INICIAL` | Compra propia e historial |
-| empleado@farmacia.com | `CLAVE_INICIAL` | Registro de clientes y venta presencial |
-| admin@farmacia.com | `CLAVE_INICIAL` | Gestión de inventario, ventas e informes |
+| cliente@mail.com | `Cliente2026*` | Compra propia e historial |
+| empleado@farmacia.com | `Empleado2026*` | Registro de clientes y venta presencial |
+| admin@farmacia.com | `Admin2026*` | Gestión de inventario, ventas, informes e integración UDS |
 
+Estas contraseñas están en `CLAVES_INICIALES` de `backend/main.py` y siempre son las
+mismas (no se generan al azar). Si defines `CLAVE_INICIAL`, esa reemplaza a las tres.
 La API asigna la contraseña inicial únicamente a registros que todavía tengan
 `REEMPLAZAR_POR_HASH`; no reemplaza contraseñas ya establecidas. Cada usuario puede
 cambiar su contraseña con el botón 🔑 junto a su nombre (mínimo 8 caracteres).

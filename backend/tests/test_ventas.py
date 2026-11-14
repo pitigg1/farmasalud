@@ -397,14 +397,14 @@ def test_initial_password_and_password_change(client):
     assert (reg("1234"), reg("farmacia123"), reg("clave-cliente-1")) == (422, 422, 201)
 
 
-def test_random_initial_password_when_not_configured(monkeypatch, caplog):
+def test_fixed_initial_passwords_when_not_configured(monkeypatch, caplog):
     monkeypatch.setattr(main, "CLAVE_INICIAL", "")
     with caplog.at_level("WARNING", logger="uvicorn.error"), TestClient(main.app) as c:
-        line = next(r.getMessage() for r in caplog.records if "Contraseña inicial" in r.getMessage())
-        clave = line.split(": ")[1].split("  ")[0]
-        assert len(clave) >= 12 and clave != "farmacia123"
-        r = c.post("/api/auth/login", json={"correo": "empleado@farmacia.com", "password": clave})
-        assert r.status_code == 200
+        assert any("contraseñas iniciales" in r.getMessage() for r in caplog.records)
+        for correo, clave in main.CLAVES_INICIALES.items():  # siempre las mismas, nunca aleatorias
+            assert c.post("/api/auth/login", json={"correo": correo, "password": clave}).status_code == 200, correo
+        assert c.post("/api/auth/login", json={"correo": "admin@farmacia.com",
+                                               "password": "Empleado2026*"}).status_code == 401
 
 
 def test_warns_accounts_still_using_demo_password(caplog):
